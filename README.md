@@ -14,11 +14,11 @@ The release is a **pretrained checkpoint**. Enter the beginning of a passage and
 
 **Prompt:** 人工智能的发展
 
-**Continuation excerpt:**
+**Actual browser continuation:**
 
-> 已经成为当今科技领域最重要的研究方向。随着人工智能技术的不断发展，人工智能已经成为当前科技领域最重要的研究方向之一。人工智能技术在医疗、金融、教育、交通等领域都得到了广泛应用，为人类生活带来极大的便利。
+> 正在带来许多好处，例如提高生产力、降低成本和改善生活质量。然而，人工智能的发展也带来了一些问题，例如隐私和安全问题。人工智能的发展也需要在适当的时候进行监管和规范。
 
-Generated with the local PyTorch implementation; the [generation record](docs/generation-example.json) includes the full output and sampling settings. To generate locally after cloning the repository:
+Generated with the browser implementation linked above. To generate locally with PyTorch after cloning the repository:
 
 ```bash
 uv sync

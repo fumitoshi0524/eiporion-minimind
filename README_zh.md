@@ -6,13 +6,19 @@
 
 Eiporion-MiniMind 探索一个具体问题：小型 decoder-only 语言模型的投影矩阵，能否在预训练过程中始终以 INT8 格式存储，并直接接受离散权重更新？实现将 MiniMind 衍生的 Transformer 与作者开发的 Eiporion PyTorch 库结合：注意力和前馈网络使用 INT8 权重及逐行 FP32 缩放因子，词嵌入、共享输出头和归一化权重保留浮点表示。
 
+**重点在于训练期间的权重存储：投影矩阵在优化过程中实际保存为 INT8，不另外保留 FP16／FP32 主权重副本。本文实现通过 BF16 矩阵乘法完成训练，不依赖原生 FP4／FP8 训练指令。**
+
 八层模型包含约 63.9M 个等效权重。经过两轮、39,696 个 microbatch 迭代，训练损失从首次记录的 8.0936 降到最后一步的 1.9683。预训练完成后，在本地对模型进行了六项中英文零样本评测。完整权重及缩放因子占 **75.30 MiB**，相同唯一权重的 FP32 表示约占 **243.81 MiB**，存储缩减约 **3.24 倍**。实验建立了可运行的直接量化训练流程，并展示了紧凑权重表示的优势；接近随机选择水平的下游结果，也提示需要进一步通过受控实验研究模型质量。
 
 ## 1. 研究问题
 
-压缩训练完成后的模型，与减少训练过程中持有的状态，是不同的问题。训练后量化从已训练的模型出发；许多量化感知训练方案在前向过程中模拟量化，同时更新浮点主权重。本项目关心的是：
+低比特训练包含几个独立的设计选择：权重取值所在的量化网格、张量的实际存储 dtype、是否保留浮点主权重，以及矩阵乘法采用的计算精度。仅有低比特前向表示，还不能确定训练中常驻状态的大小。
 
-> 能否把注意力和前馈投影矩阵本身保存在 INT8 张量中，并在语言模型预训练中持续更新这些整数值？
+本项目关注两个实际问题。其一，依靠原生 FP4／FP8 kernel 加速，需要设备和软件栈支持相应算术格式；其二，[BitNet 一类量化感知训练](https://www.jmlr.org/papers/v26/24-2050.html) 虽然采用量化前向权重，仍保留浮点隐含权重来累积更新。消除这一副本，解决的是训练状态预算中的另一部分。
+
+最直接的前作是 Zhao 等人的 [Direct Quantized Training of Language Models with Stochastic Rounding](https://arxiv.org/abs/2412.04787)，研究了不保留高精度隐含权重的直接更新。本项目进一步关注具体实现问题：
+
+> 能否将注意力和前馈投影实际保存在 INT8 张量中，不持有浮点主权重副本，并通过常规 BF16 矩阵乘法完成训练？
 
 困难在于更新分辨率：优化器给出的更新可能远小于整数网格的一步，直接确定性取整会丢失这些更新。实现通过残差累积与随机取整，使较小的更新也有机会改变整数权重。
 
@@ -23,6 +29,15 @@ Eiporion-MiniMind 探索一个具体问题：小型 decoder-only 语言模型的
 - **实验评估：** 分析训练动态、六项零样本评测和整模型权重存储。
 
 量化投影矩阵直接接受整数更新，词嵌入、归一化和中间计算采用浮点精度。
+
+| 训练方式 | 常驻权重表示 | 浮点主权重副本 | 矩阵计算 |
+|---|---|---|---|
+| BitNet 一类 QAT | 浮点隐含权重，前向使用量化值 | 保留 | 混合精度训练 |
+| FP8 系统，例如 [FP8-LM](https://arxiv.org/abs/2310.18313) | 按配置组合 FP8 与较高精度状态 | FP8-LM 保留带缩放的较高精度主权重 | 支持 FP8 的 kernel |
+| [DQT 参考实现](https://github.com/KYuuto1006/DQT/tree/767a724ed3547b926f785a89613eda00bfa730b3) | 浮点张量承载量化后的取值 | 直接更新过程不另保留隐含权重副本 | 用浮点计算模拟量化网格 |
+| **Eiporion-MiniMind** | **INT8 投影 buffer 与 FP32 行 scale** | **量化投影没有主权重副本** | **本文运行使用 BF16 GEMM** |
+
+表格比较代表性实现，并非穷尽所有低精度训练路线；权重表示、计算格式和优化器状态是不同维度。FP8 系统也可以通过压缩其他训练状态减少显存。
 
 ## 2. 模型架构与参数统计
 
@@ -121,6 +136,12 @@ $$
 
 本实验采用的 [Eiporion 0.1.0](https://github.com/fumitoshi0524/eiporion/tree/bff6aab67a061b4a006b6d5a1dc6908b7c41c438) 在整数更新过程中保持行 scale 固定。
 
+### 3.4 训练期间的常驻状态
+
+每个量化投影在优化器步之间保留 `torch.int8` 矩阵和 FP32 行 scale，没有对应的浮点 `nn.Parameter` 作为主权重矩阵。一阶矩、二阶矩和更新残差以分块 8-bit 形式保存，浮点 embedding/output 与归一化参数单独优化。
+
+计算过程中仍会生成 BF16 有效权重张量、缓存权重梯度，优化器处理量化状态时也需要浮点工作张量。这些计算／更新缓冲区与常驻的主权重副本不同。因此，紧凑权重表示在训练期间已经存在；它对峰值 GPU 显存的影响，还取决于这些缓冲区及激活的占用。
+
 ## 4. 训练设置
 
 预训练使用 MiniMind 的 `pretrain_t2t_mini.jsonl`。数据加载器读取每条样本的 `text` 字段，进行分词、截断、添加首尾标记并补齐到 512 tokens；padding 对应的 label 设置为 `-100`，模型内部移位后计算下一 token 的交叉熵。
@@ -206,6 +227,8 @@ $$
 
 完整 safetensors 文件包含序列化元数据后约为 75.32 MiB。以上表格衡量权重表示的存储成本，实际训练还需容纳优化器状态、梯度、激活和临时计算缓冲区。
 
+相同的 INT8 buffer 也承担训练期间的常驻投影权重，因此表示上的节省在导出前就已存在。3.24 倍量化的是权重与 scale 的存储缩减，不代表训练峰值显存的整体缩减比例。
+
 ## 6. 讨论与局限
 
 本实验建立了整数存储投影权重的实际训练流程，将整模型权重存储减少约 69%。下一步的核心问题是：这种存储优势与模型质量之间有怎样的关系。
@@ -280,7 +303,19 @@ python scripts/inspect_safetensors.py out/model.safetensors
 
 ## 8. 相关工作与致谢
 
-架构与数据流程建立在 [MiniMind](https://github.com/jingyaogong/minimind) 之上。Eiporion 是作者的配套实现；随机取整与分块优化器量化已有长期研究基础：
+架构与数据流程建立在 [MiniMind](https://github.com/jingyaogong/minimind) 之上，Eiporion 是作者的配套实现。最相关的研究涉及直接量化更新、隐含权重 QAT、低精度计算和优化器状态存储。
+
+### 直接量化更新
+
+- **Zhao 等，[Direct Quantized Training of Language Models with Stochastic Rounding](https://arxiv.org/abs/2412.04787)，ACML 2025**（[代码](https://github.com/KYuuto1006/DQT)）。这是最直接的方法前作，通过随机取整实现不持有额外高精度隐含矩阵的更新。其公开[线性层](https://github.com/KYuuto1006/DQT/blob/767a724ed3547b926f785a89613eda00bfa730b3/utils_quant.py) 继承 `nn.Linear`，[取整实现](https://github.com/KYuuto1006/DQT/blob/767a724ed3547b926f785a89613eda00bfa730b3/custom_optimizer.py) 将结果转回输入 dtype。Eiporion 显式以 INT8 buffer 保存投影矩阵，并结合分块量化优化器状态执行更新。
+
+### 隐含权重与计算精度
+
+- **Wang 等，[BitNet: 1-bit Pre-training for Large Language Models](https://www.jmlr.org/papers/v26/24-2050.html)，JMLR 2025。** BitNet 展示了大规模低比特语言模型训练，其混合精度方案保留高精度隐含权重来累积更新，并在前向时量化。Eiporion 则直接对整数 buffer 施加投影权重更新。
+- **Peng 等，[FP8-LM: Training FP8 Large Language Models](https://arxiv.org/abs/2310.18313)，2023。** FP8-LM 组合低精度计算、通信和优化器状态，在 H100 上报告了加速效果；其默认优化器仍保留带缩放的 FP16 主权重。这与通过整数 buffer 和 BF16 计算降低常驻权重存储是互补的系统设计方向。
+- **Zamirai 等，[Revisiting BFloat16 Training](https://arxiv.org/abs/2010.06192)，2020／2021。** 研究 BF16 训练中小更新的随机取整与补偿求和，为减少对高精度更新累积的依赖提供了更广泛的背景。
+
+### 数值方法与优化器基础
 
 - Gupta 等，[Deep Learning with Limited Numerical Precision](https://proceedings.mlr.press/v37/gupta15.html)，ICML 2015：研究低精度训练中的随机取整。
 - Dettmers 等，[8-bit Optimizers via Block-wise Quantization](https://arxiv.org/abs/2110.02861)，ICLR 2022：研究低精度优化器统计量。Eiporion 对浮点参数使用 bitsandbytes，对 INT8 buffer 采用自己的状态与更新逻辑。

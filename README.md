@@ -6,13 +6,19 @@
 
 Eiporion-MiniMind investigates whether the projection weights of a small decoder-only language model can remain in INT8 storage while being updated during pretraining. The implementation combines a MiniMind-derived transformer with Eiporion, a companion PyTorch library developed for quantized linear layers and discrete weight updates. Attention and feed-forward projections use INT8 weight buffers and per-row floating-point scales; the shared token embedding/output head and normalization weights remain floating point.
 
+**The focus is training-time weight storage: projection matrices are physically stored as INT8 throughout optimization, without separate FP16/FP32 master-weight copies. The reported implementation uses BF16 matrix multiplication and does not require native FP4/FP8 training instructions.**
+
 The eight-layer model has approximately 63.9 million dense-equivalent weights. Over two epochs and 39,696 microbatch iterations, training loss decreases from 8.0936 at the first logged step to 1.9683 at the final step. We evaluate the pretrained model locally on six English and Chinese zero-shot benchmarks. Its weights and scales occupy **75.30 MiB**, compared with **243.81 MiB for the equivalent FP32 representation**, a **3.24× storage reduction**. The results demonstrate a working training pipeline with compact persistent weights, while the near-chance downstream scores motivate further controlled evaluation of model quality.
 
 ## 1. Research question and scope
 
-Reducing the size of a final checkpoint and reducing the state maintained during training are different problems. Post-training quantization starts from an already trained model. Many quantization-aware training recipes simulate quantization while updating a floating-point master copy. This project instead asks:
+Low-bit training involves several design choices: the numerical grid of the weights, their physical storage dtype, the use of a floating-point master copy, and the arithmetic used for matrix multiplication. A low-bit forward representation alone does not determine the amount of state resident during training.
 
-> Can the attention and feed-forward weight matrices themselves be maintained as INT8 tensors and receive useful updates during language-model pretraining?
+Two practical considerations motivate this project. First, acceleration through native FP4/FP8 kernels depends on the arithmetic supported by the device and software stack. Second, [BitNet-style quantization-aware training](https://www.jmlr.org/papers/v26/24-2050.html) retains floating-point latent weights for updates, even though its forward weights are quantized. Removing that latent copy addresses a separate part of the training-state budget.
+
+The closest methodological precedent is Zhao et al.'s [Direct Quantized Training of Language Models with Stochastic Rounding](https://arxiv.org/abs/2412.04787), which studies direct updates without high-precision latent weights. Here, we investigate a concrete implementation question:
+
+> Can attention and feed-forward projections be maintained as actual INT8 tensors, updated without floating-point master copies, and trained through ordinary BF16 matrix multiplication?
 
 The main difficulty is update resolution. A small adaptive-optimizer update can be much smaller than one step on an integer grid; deterministic rounding can erase it. The implementation combines accumulated update residuals with stochastic rounding so that these small updates can eventually change the stored integer weights.
 
@@ -23,6 +29,15 @@ The work comprises three connected pieces:
 - **Evaluation:** training dynamics, six zero-shot benchmarks, and whole-model weight-storage analysis.
 
 The quantized projection matrices are updated directly; embeddings, normalization, and intermediate computation use floating-point precision.
+
+| Training approach | Persistent weight representation | Floating-point master copy | Matrix computation |
+|---|---|---|---|
+| BitNet-style QAT | Floating-point latent weights with quantized forward weights | Retained | Mixed-precision training |
+| FP8 training systems, e.g. [FP8-LM](https://arxiv.org/abs/2310.18313) | FP8 and higher-precision state, depending on the recipe | FP8-LM retains a scaled higher-precision master | FP8-capable kernels |
+| [DQT reference implementation](https://github.com/KYuuto1006/DQT/tree/767a724ed3547b926f785a89613eda00bfa730b3) | Quantized values represented by floating-point tensors | No separate latent-weight copy in the direct update | Floating-point simulation of the quantized grid |
+| **Eiporion-MiniMind** | **INT8 projection buffers with FP32 row scales** | **No master copy for quantized projections** | **BF16 GEMM in the reported run** |
+
+These are representative implementations, rather than an exhaustive classification. The comparison separates weight representation from arithmetic and optimizer state; FP8 systems can also reduce training memory through other components.
 
 ## 2. Model architecture
 
@@ -125,6 +140,12 @@ The experiment uses **momentum-biased stochastic rounding** through `EiporionOpt
 
 In [Eiporion 0.1.0](https://github.com/fumitoshi0524/eiporion/tree/bff6aab67a061b4a006b6d5a1dc6908b7c41c438), the row scales remain fixed during these integer updates.
 
+### 3.4 State resident during training
+
+Each quantized projection retains its `torch.int8` matrix and FP32 row scales between optimization steps. There is no corresponding floating-point `nn.Parameter` serving as a master matrix. Its first moment, second moment, and update residual are stored in blockwise 8-bit form. Floating-point embedding/output and normalization parameters are optimized separately.
+
+BF16 effective-weight tensors and cached weight gradients are still materialized for computation, and the optimizer uses floating-point working tensors when processing its quantized state. These are compute/update buffers, distinct from a persistent master-weight copy. The compact representation therefore applies during training as well as checkpoint storage, while its effect on peak GPU allocation also depends on these buffers and activations.
+
 ## 4. Training setup
 
 Pretraining uses the MiniMind `pretrain_t2t_mini.jsonl` dataset and next-token cross-entropy. The dataset loader reads a `text` field, tokenizes and truncates each example, adds beginning/end tokens, and pads to 512 tokens. Padding labels are masked with `-100`; the model shifts logits and labels for next-token prediction.
@@ -216,6 +237,8 @@ or approximately **69.1% fewer bytes** for weights and scales relative to the FP
 
 The serialized safetensors checkpoint occupies approximately 75.32 MiB including file metadata. The table measures weight representation cost; training memory additionally includes optimizer state, gradients, activations, and temporary compute buffers.
 
+The same INT8 buffers are the persistent projection weights during training. Thus, the representation saving is present before export; the 3.24× figure specifically quantifies weights and scales, rather than total peak training memory.
+
 ## 6. Discussion and limitations
 
 The experiment demonstrates a practical pipeline for training integer-stored transformer projections and reduces whole-model weight storage by approximately 69%. Its main unresolved question is the relationship between that storage advantage and model quality.
@@ -290,7 +313,19 @@ python scripts/inspect_safetensors.py out/model.safetensors
 
 ## 8. Related work and acknowledgements
 
-The architecture and data pipeline build on [MiniMind](https://github.com/jingyaogong/minimind). Eiporion is the author's companion implementation. Related work on stochastic rounding and optimizer-state quantization includes:
+The architecture and data pipeline build on [MiniMind](https://github.com/jingyaogong/minimind). Eiporion is the author's companion implementation. The most relevant research concerns direct quantized updates, latent-weight QAT, low-precision arithmetic, and optimizer-state storage.
+
+### Direct quantized updates
+
+- **Zhao et al., [Direct Quantized Training of Language Models with Stochastic Rounding](https://arxiv.org/abs/2412.04787), ACML 2025** ([code](https://github.com/KYuuto1006/DQT)). This is the closest methodological precedent: stochastic rounding enables updates without retaining a separate high-precision latent matrix. Its released [linear layer](https://github.com/KYuuto1006/DQT/blob/767a724ed3547b926f785a89613eda00bfa730b3/utils_quant.py) inherits `nn.Linear`; the [rounding code](https://github.com/KYuuto1006/DQT/blob/767a724ed3547b926f785a89613eda00bfa730b3/custom_optimizer.py) returns values in the input dtype. Eiporion's implementation explicitly stores projection matrices as INT8 buffers and combines their updates with blockwise quantized optimizer state.
+
+### Latent weights and arithmetic precision
+
+- **Wang et al., [BitNet: 1-bit Pre-training for Large Language Models](https://www.jmlr.org/papers/v26/24-2050.html), JMLR 2025.** BitNet establishes low-bit language-model training at scale. Its mixed-precision recipe retains high-precision latent weights to accumulate updates and quantizes them for the forward pass. Eiporion instead applies the projection updates to integer buffers.
+- **Peng et al., [FP8-LM: Training FP8 Large Language Models](https://arxiv.org/abs/2310.18313), 2023.** FP8-LM combines low-precision computation, communication, and optimizer state, with its reported acceleration on H100 hardware. Its default optimizer still uses scaled FP16 master weights. This is complementary to reducing persistent weight storage through integer buffers and BF16 computation.
+- **Zamirai et al., [Revisiting BFloat16 Training](https://arxiv.org/abs/2010.06192), 2020/2021.** This work studies stochastic rounding and compensated summation for small updates in BF16 training, providing broader context for reducing dependence on high-precision update accumulation.
+
+### Numerical and optimizer foundations
 
 - Gupta et al., [*Deep Learning with Limited Numerical Precision*](https://proceedings.mlr.press/v37/gupta15.html), ICML 2015, studies stochastic rounding for low-precision training.
 - Dettmers et al., [*8-bit Optimizers via Block-wise Quantization*](https://arxiv.org/abs/2110.02861), ICLR 2022, develops low-precision optimizer statistics. Eiporion uses bitsandbytes for its floating-point parameters and its own state/update logic for INT8 buffers.

@@ -193,8 +193,6 @@ After pretraining, the model was evaluated **locally** on six English and Chines
 
 The scores indicate limited downstream capability: PIQA and WinoGrande remain close to the 50% binary-choice reference, while HellaSwag, C-Eval, and CMMLU are close to the 25% four-choice reference. The decrease in training loss therefore does not translate into strong performance on these tasks.
 
-The upstream [MiniMind evaluation discussion](https://github.com/jingyaogong/minimind#ⅴ-客观评测) similarly reports near-chance results for several tasks at the 64M scale. Its published models and evaluation formats differ from this pretraining experiment, so those results provide context rather than a controlled floating-point baseline. At this performance level, small differences between independently evaluated models offer little evidence about the accuracy cost of quantization.
-
 ### 5.3 Weight-storage accounting
 
 Weight storage is calculated over the same unique model weights in each representation, using **MiB ($2^{20}$ bytes)** throughout. The INT8 representation includes its row scales and the floating-point embedding/output and normalization weights.

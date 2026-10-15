@@ -4,9 +4,9 @@
 
 ## 先试一下
 
-**[打开浏览器续写体验 ↗](https://fumitoshi0524.github.io/eiporion-minimind/)** · [模型权重与 tokenizer](demo/model/) · [生成脚本](scripts/generate.py)
+**[打开浏览器续写体验 ↗](https://fumitoshi0524.github.io/eiporion-minimind/?lang=zh)** · [模型权重与 tokenizer](demo/model/) · [生成脚本](scripts/generate.py)
 
-模型约 64M 参数，完整权重文件 **75.32 MiB**。点击页面中的“加载模型”后，权重下载到读者设备，由 WebGPU 在本机生成文字，无需登录或提供 API key。需要支持 WebGPU 的浏览器；浏览器实现采用 FP32 计算，保留 INT8 投影权重存储。
+模型约 64M 参数，完整权重文件 **75.32 MiB**。点击页面中的“加载模型”后，权重下载到读者设备，优先通过 WebGPU 在本机生成文字；浏览器未提供可用 GPU 时自动切换到 CPU，速度会较慢。无需登录或提供 API key。两种后端均保留 INT8 投影权重存储，并采用浮点计算。
 
 当前发布的是**预训练版**，适合输入一个开头并观察续写。它尚未经过对话指令微调，因此页面采用文本续写形式。
 

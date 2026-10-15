@@ -3,7 +3,11 @@
 export class EiporionGPU {
   async load(url, progress) {
     if (!navigator.gpu) throw new Error('WebGPU is unavailable. Use a recent Chrome or Edge with hardware acceleration enabled.');
-    const adapter = await navigator.gpu.requestAdapter({powerPreference: 'high-performance'});
+    let adapter;
+    for (const options of [{powerPreference:'high-performance'}, {}, {powerPreference:'low-power'}, {featureLevel:'compatibility'}]) {
+      try { adapter=await navigator.gpu.requestAdapter(options); } catch {}
+      if(adapter)break;
+    }
     if (!adapter) throw new Error('No compatible WebGPU adapter was found.');
     this.device = await adapter.requestDevice();
     this.device.lost.then(info => { this.lost = info.message || 'GPU device lost'; });

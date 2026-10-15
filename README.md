@@ -4,26 +4,26 @@
 
 ## Try the model
 
-**[Open the browser playground ↗](https://fumitoshi0524.github.io/eiporion-minimind/)** · [Weights and tokenizer](demo/model/) · [Generation script](scripts/generate.py)
+**[Open the browser playground ↗](https://fumitoshi0524.github.io/eiporion-minimind/?lang=en)** · [Weights and tokenizer](demo/model/) · [Generation script](scripts/generate.py)
 
-A roughly 64M-parameter model with a **75.32 MiB** checkpoint. Click “加载模型” to download the weights and generate text on your own device using WebGPU. No login or API key is needed. A WebGPU-capable browser is required; the browser backend uses FP32 arithmetic while preserving INT8 projection-weight storage.
+A roughly 64M-parameter model with a **75.32 MiB** checkpoint. Click **Load model** to download the weights and generate text on your own device. The page uses WebGPU when available and automatically falls back to a CPU worker otherwise. CPU generation is slower. No login or API key is needed; both backends preserve INT8 projection storage and use floating-point computation.
 
 The release is a **pretrained checkpoint**. Enter the beginning of a passage and explore its continuation; this checkpoint has not been instruction-tuned for chat.
 
 ### An actual generation
 
-**Prompt:** 人工智能的发展
+**Prompt:** Artificial intelligence is
 
 **Actual browser continuation:**
 
-> 正在带来许多好处，例如提高生产力、降低成本和改善生活质量。然而，人工智能的发展也带来了一些问题，例如隐私和安全问题。人工智能的发展也需要在适当的时候进行监管和规范。
+> becoming increasingly important in any single, as of the latest industry, we are excellent, technology, and artificial intelligence. It is crucial to remember that AI is used in various fields such as computer science, artificial intelligence, and other applications. It is important to ensure that
 
-Generated with the browser implementation linked above. To generate locally with PyTorch after cloning the repository:
+An unedited English sample generated with the browser CPU backend linked above (64-token limit). To generate locally with PyTorch after cloning the repository:
 
 ```bash
 uv sync
 uv run python scripts/generate.py --model-dir demo/model \
-  --prompt "人工智能的发展" --max-new-tokens 96 --seed 42
+  --prompt "Artificial intelligence is" --max-new-tokens 96 --seed 42
 ```
 
 ## Abstract
@@ -296,7 +296,7 @@ uv run python scripts/export_hf.py \
   --weight pretrain --hidden-size 768 --num-hidden-layers 8 --save-dir out
 
 uv run python scripts/generate.py --model-dir out \
-  --prompt "人工智能的发展" --max-new-tokens 128
+  --prompt "Artificial intelligence is" --max-new-tokens 128
 ```
 
 The export includes configuration, weights, and tokenizer files for local loading. The generation script preserves FP32 embedding/head weights and INT8 projection buffers. Completion is the default; `--mode chat` is reserved for a future instruction-tuned checkpoint.

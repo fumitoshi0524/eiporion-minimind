@@ -23,7 +23,7 @@
     <div class="facts"><span>64M PARAMETERS</span><span>INT8 PROJECTION WEIGHTS</span><span>75.32 MiB DOWNLOAD</span></div>
   </header>
   <section class="panel" aria-label="Text generation playground">
-    <div class="toolbar"><div id="status" role="status" aria-live="polite">尚未加载 · 需要支持 WebGPU 的浏览器</div><button id="load" class="primary">加载模型</button></div>
+    <div class="toolbar"><div id="status" role="status" aria-live="polite">尚未加载 · WebGPU 不可用时自动使用 CPU</div><button id="load" class="primary">加载模型</button></div>
     <div class="editor"><label for="prompt">文本开头 / PROMPT</label><textarea id="prompt" maxlength="1500" spellcheck="false">人工智能的发展</textarea>
       <div class="examples"><button data-prompt="人工智能的发展">人工智能的发展</button><button data-prompt="在一个安静的夜晚，">在一个安静的夜晚，</button><button data-prompt="学习一门新的语言，首先需要">学习一门新的语言，首先需要</button></div>
       <small>这是预训练模型，展示文本续写；尚未进行对话指令微调。</small></div>
@@ -32,5 +32,5 @@
       <div class="actions"><button id="stop" disabled>停止</button><button id="generate" class="primary" disabled>开始续写</button></div></div>
     <div class="result"><h2>续写 / CONTINUATION</h2><p id="empty">生成的文字会显示在这里。</p><p><span id="prefix"></span><span id="output"></span></p><div id="stats"></div><div id="error" role="alert"></div></div>
   </section>
-  <footer><span>WebGPU · 本地推理 · FP32 计算 / INT8 权重存储</span><span><a href="https://github.com/fumitoshi0524/eiporion-minimind/blob/main/README_zh.md">阅读研究报告 ↗</a></span></footer>
-</main><script type="module" src="app.js"></script></body></html>
+  <footer><span>本地推理 · WebGPU / CPU · INT8 权重存储</span><span><a href="https://github.com/fumitoshi0524/eiporion-minimind/blob/main/README_zh.md">阅读研究报告 ↗</a></span></footer>
+</main><script type="module" src="app.js?v=2"></script></body></html>

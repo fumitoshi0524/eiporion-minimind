@@ -1,0 +1,119 @@
+{
+  "source_url": "https://swanlab.cn/@fumitoshi/Eiporion-Pretrain/runs/r3jdjca4u4ihm6ei247bc",
+  "project_id": "vgb6r7ghuoqdasabd82hz",
+  "run_id": "r3jdjca4u4ihm6ei247bc",
+  "name": "Eiporion-Pretrain-Epoch-2-BatchSize-64-LearningRate-0.0002",
+  "state": "FINISHED",
+  "created_at_utc": "2026-05-09T12:26:25.341Z",
+  "finished_at_utc": "2026-05-09T15:53:11.215Z",
+  "tracked_duration_seconds": 12405.874,
+  "command": "train_pretrain.py --use_swanlab",
+  "recorded_git_commit": "abad71f5ea0a08d926b21475ae4afa59f57bdb92",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 4090 D",
+    "gpu_count": 1,
+    "gpu_capacity_GB": "24"
+  },
+  "environment": {
+    "python": "3.12.3",
+    "torch": "2.8.0+cu128",
+    "transformers": "5.7.0",
+    "bitsandbytes": "0.45.5",
+    "eiporion": "0.1.0",
+    "swanlab": "0.7.16",
+    "datasets": "4.8.5"
+  },
+  "configuration_recorded_in_swanlab": null,
+  "training": {
+    "epochs": 2,
+    "microbatches_per_epoch": 19848,
+    "microbatches_total": 39696,
+    "dataset_examples": 1270238,
+    "microbatch_size": 64,
+    "gradient_accumulation": 4,
+    "optimizer_updates_derived_from_recorded_source": 9924,
+    "nonpadding_token_count": null
+  },
+  "metrics": {
+    "logged_points_per_series": 398,
+    "first_logged_step": 100,
+    "first_logged_loss": 8.093639373779297,
+    "last_logged_step": 39696,
+    "last_logged_loss": 1.9683465957641602,
+    "minimum_logged_loss": 1.8296386003494265,
+    "peak_logged_lr": 0.0002,
+    "peak_logged_lr_step": 8000,
+    "final_logged_lr": 2e-05
+  },
+  "console_evidence": [
+    {
+      "epoch": 7,
+      "level": "INFO",
+      "message": "Model Params (nn.Parameter): 4.93M",
+      "tag": "",
+      "timestamp": "2026-05-09T12:26:26Z"
+    },
+    {
+      "epoch": 8,
+      "level": "INFO",
+      "message": "INT8 Weights (dense-equivalent): 58.98M",
+      "tag": "",
+      "timestamp": "2026-05-09T12:26:26Z"
+    },
+    {
+      "epoch": 9,
+      "level": "INFO",
+      "message": "INT8 Weight Storage: 56.49 MB",
+      "tag": "",
+      "timestamp": "2026-05-09T12:26:26Z"
+    },
+    {
+      "epoch": 10,
+      "level": "INFO",
+      "message": "Effective Params (dense-equivalent): 63.91M",
+      "tag": "",
+      "timestamp": "2026-05-09T12:26:26Z"
+    },
+    {
+      "epoch": 11,
+      "level": "INFO",
+      "message": "Trainable Params: 4.930M",
+      "tag": "",
+      "timestamp": "2026-05-09T12:26:26Z"
+    },
+    {
+      "epoch": 12,
+      "level": "WARN",
+      "message": "Generating train split: 1270238 examples [00:12, 102795.03 examples/s]",
+      "tag": "",
+      "timestamp": "2026-05-09T12:26:40Z"
+    },
+    {
+      "epoch": 13,
+      "level": "INFO",
+      "message": "Epoch:[1/2](100/19848), loss: 8.0936, lr: 0.00002225, eta: 103.0min",
+      "tag": "",
+      "timestamp": "2026-05-09T12:27:12Z"
+    },
+    {
+      "epoch": 211,
+      "level": "INFO",
+      "message": "Epoch:[1/2](19848/19848), loss: 2.0561, lr: 0.00014475, eta: 0.0min",
+      "tag": "",
+      "timestamp": "2026-05-09T14:09:52Z"
+    },
+    {
+      "epoch": 410,
+      "level": "INFO",
+      "message": "Epoch:[2/2](19848/19848), loss: 1.9683, lr: 0.00002000, eta: 0.0min",
+      "tag": "",
+      "timestamp": "2026-05-09T15:53:08Z"
+    }
+  ],
+  "scope_notes": [
+    "The batch size and epoch count are encoded in the run name; accumulation and sequence length are source defaults for the recorded command, not fields in a saved hyperparameter config.",
+    "The Git commit identifies repository HEAD reported by the SDK; it does not attest that the working tree was clean.",
+    "No checkpoint SHA-256 or benchmark result identity is stored in this run record.",
+    "The elapsed interval includes tracking overhead; it is not a kernel throughput measurement."
+  ]
+}

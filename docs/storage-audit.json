@@ -1,0 +1,25 @@
+{
+  "checkpoint": "model.safetensors",
+  "sha256": "05c5554c5dffd7dcf3e4636e1c5796f7a466ee3315ae800fe8f3e0439aa560e3",
+  "file_bytes": 78977456,
+  "header_and_prefix_bytes": 21488,
+  "tensor_payload_bytes": 78955968,
+  "scalar_counts_by_dtype": {
+    "I64": 56,
+    "F32": 4993280,
+    "I8": 58982400
+  },
+  "tensor_bytes_by_dtype": {
+    "I64": 448,
+    "F32": 19973120,
+    "I8": 58982400
+  },
+  "tensor_bytes_by_group": {
+    "runtime_handles": 448,
+    "other_weights": 19719168,
+    "projection_scales": 253952,
+    "int8_projection_weights": 58982400
+  },
+  "weight_and_scale_bytes": 78955520,
+  "unit": "bytes; MiB = bytes / 1048576"
+}

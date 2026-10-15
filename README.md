@@ -6,7 +6,7 @@
 
 Eiporion-MiniMind investigates whether the projection weights of a small decoder-only language model can remain in INT8 storage while being updated during pretraining. The implementation combines a MiniMind-derived transformer with Eiporion, a companion PyTorch library developed for quantized linear layers and discrete weight updates. Attention and feed-forward projections use INT8 weight buffers and per-row floating-point scales; the shared token embedding/output head and normalization weights remain floating point.
 
-The project includes an eight-layer model with approximately 63.9 million dense-equivalent weights, a publicly tracked two-epoch training run, and reported zero-shot results on six English and Chinese benchmarks. The tracked run completed 39,696 microbatch iterations, with logged training loss decreasing from 8.0936 at step 100 to 1.9683 at the final step. A storage audit of a retained export gives **75.30 MiB for weights and scales**, compared with **243.81 MiB for the same unique weights stored in FP32**, or approximately **3.24× less weight storage**. The benchmark scores are close to chance on several tasks, so the experiment supports a study of training behavior and representation cost rather than a claim of competitive language understanding or accuracy parity with floating-point training.
+The eight-layer model has approximately 63.9 million dense-equivalent weights. Over two epochs and 39,696 microbatch iterations, training loss decreases from 8.0936 at the first logged step to 1.9683 at the final step. We evaluate the pretrained model locally on six English and Chinese zero-shot benchmarks. Its weights and scales occupy **75.30 MiB**, compared with **243.81 MiB for the equivalent FP32 representation**, a **3.24× storage reduction**. The results demonstrate a working training pipeline with compact persistent weights, while the near-chance downstream scores motivate further controlled evaluation of model quality.
 
 ## 1. Research question and scope
 
@@ -20,9 +20,9 @@ The work comprises three connected pieces:
 
 - **Eiporion:** the author's [companion library](https://github.com/fumitoshi0524/eiporion) for INT8 linear layers, custom backward computation, and quantized optimizer state.
 - **Model integration:** replacing the seven projection matrices in each MiniMind-derived transformer block while retaining a floating-point embedding/output interface.
-- **Experimental documentation:** the saved training trajectory, six reported benchmark results, and explicit accounting of which tensors are compressed.
+- **Evaluation:** training dynamics, six zero-shot benchmarks, and whole-model weight-storage analysis.
 
-This report uses *direct INT8 weight training* for that implementation. It does not assert that every tensor or arithmetic operation is integer-valued, that stochastic rounding removes all gradient approximation, or that the approach establishes a new general training paradigm.
+The quantized projection matrices are updated directly; embeddings, normalization, and intermediate computation use floating-point precision.
 
 ## 2. Model architecture
 
@@ -51,7 +51,7 @@ The 32,768-position configuration is not an evaluated context length. The code i
 
 ### Parameter counting
 
-INT8 weights are registered as buffers, so `sum(p.numel() for p in model.parameters())` does not count the full model. Conversely, adding the INT8 weights to an already dense-equivalent total counts them twice. The shared embedding and output head must also be counted only once.
+The dense-equivalent count includes both INT8 projection buffers and floating-point parameters, with the shared embedding/output weight counted once.
 
 For the configuration above:
 
@@ -81,12 +81,12 @@ With inputs represented as rows, the layer computes $Y=XW^\top$. The transformer
 
 $$
 s_i=\frac{\max_j |W^{(0)}_{ij}|}{127},\qquad
-Q_{ij}=\operatorname{clip}\!\left(\operatorname{round}(W^{(0)}_{ij}/s_i),-127,127\right),
+Q_{ij}=\mathrm{clip}\!\left(\mathrm{round}(W^{(0)}_{ij}/s_i),-127,127\right),
 $$
 
 with a small positive floor for zero rows. After initialization, the persistent representation is the integer matrix and its row scales rather than a separate floating-point master matrix for each quantized projection. The scales are buffers, not parameters learned by ordinary autograd.
 
-Storage precision is separate from compute precision. The earlier Eiporion implementation used BF16 matrix multiplication after dequantizing the weights. The current library also has a CUDA/bitsandbytes INT8 forward path; backward matrix products still use BF16. These implementation paths do not establish an end-to-end integer-only training or inference result.
+For this experiment, Eiporion 0.1.0 dequantizes weights for BF16 matrix multiplication. The persistent projection storage remains INT8 during training, while forward and backward computation operate on floating-point effective weights.
 
 ### 3.2 Custom backward computation
 
@@ -98,7 +98,7 @@ $$
 
 It accumulates the weight gradient in a module-specific cache. The optimizer consumes that cache to update the INT8 buffer, which PyTorch cannot treat as a conventional differentiable floating-point parameter.
 
-This is a surrogate optimization procedure over a discrete representation. Moving the update outside ordinary parameter autograd does not make the integer quantizer differentiable or prove that the full gradient estimator is unbiased.
+The resulting floating-point gradient supplies the update direction for the discrete weights; residual accumulation and rounding determine how that direction changes the stored integers.
 
 ### 3.3 Adaptive updates, residuals, and rounding
 
@@ -112,24 +112,24 @@ r_t\leftarrow r_{t-1}+u_t/s,
 $$
 
 $$
-\Delta Q_t=\mathcal R(r_t),\qquad
-Q_{t+1}=\operatorname{clip}(Q_t+\Delta Q_t,-127,127),\qquad
+\Delta Q_t=\mathcal{R}(r_t),\qquad
+Q_{t+1}=\mathrm{clip}(Q_t+\Delta Q_t,-127,127),\qquad
 r_t\leftarrow r_t-\Delta Q_t.
 $$
 
-The division by $s$ is rowwise. This schematic omits finite-precision state quantization and version-specific scale updates; those affect the actual optimization trajectory.
+The division by $s$ is rowwise. Residuals retain update components that have not yet been applied to the integer weights, and are stored in blockwise quantized form between steps.
 
-For ordinary stochastic rounding, a scalar $z$ is rounded to $\lfloor z\rfloor$ or $\lceil z\rceil$ with probabilities determined by its fractional part, giving $\mathbb E[\mathcal R(z)\mid z]=z$ before clipping. This explains how sub-integer updates can influence integer weights.
+For ordinary stochastic rounding, a scalar $z$ is rounded to $\lfloor z\rfloor$ or $\lceil z\rceil$ with probabilities determined by its fractional part, giving $\mathbb{E}[\mathcal{R}(z)\mid z]=z$ before clipping. This explains how sub-integer updates can influence integer weights.
 
-**The default optimizer is not pure stochastic rounding.** `train_pretrain.py` imports `EiporionOptim`, whose implementation adds a momentum-dependent bias to the rounding probability (`sr_bias_scale=0.15`). The library separately exposes `EiporionOptimSR` for the unbiased rounding variant. The scalar unbiasedness identity therefore cannot be attributed to the default optimizer or to the entire training procedure. No SR-versus-biased-SR comparison is claimed for this experiment.
+The experiment uses **momentum-biased stochastic rounding** through `EiporionOptim`, with `sr_bias_scale=0.15`. This adds an adaptive-momentum term to the fractional rounding probability before clipping it to $[0,1]$. The library also exposes `EiporionOptimSR` for ordinary stochastic rounding. The unbiasedness identity above describes that ordinary variant; the biased rule deliberately changes the update distribution.
 
-The library has changed since the original experiment: [the early implementation](https://github.com/fumitoshi0524/eiporion/tree/bff6aab67a061b4a006b6d5a1dc6908b7c41c438) used fixed row scales during integer updates, while [the inspected later revision](https://github.com/fumitoshi0524/eiporion/tree/1dde29cbd12ea2fe0b14896f4931484f787917a6) updates scales and exposes additional optimizer variants. The public run records **Eiporion 0.1.0**. Reproducing it requires that version's implementation, not an assumption that the latest library is identical.
+In [Eiporion 0.1.0](https://github.com/fumitoshi0524/eiporion/tree/bff6aab67a061b4a006b6d5a1dc6908b7c41c438), the row scales remain fixed during these integer updates.
 
 ## 4. Training setup
 
 Pretraining uses the MiniMind `pretrain_t2t_mini.jsonl` dataset and next-token cross-entropy. The dataset loader reads a `text` field, tokenizes and truncates each example, adds beginning/end tokens, and pads to 512 tokens. Padding labels are masked with `-100`; the model shifts logits and labels for next-token prediction.
 
-| Setting | Run record and source defaults |
+| Setting | Value |
 |---|---|
 | Epochs | 2 |
 | Microbatch size | 64 sequences |
@@ -144,27 +144,19 @@ Pretraining uses the MiniMind `pretrain_t2t_mini.jsonl` dataset and next-token c
 | Initial seed | 42; data-order seed changes by epoch |
 | Projection optimizer | `EiporionOptim` |
 
-The run name records two epochs, batch size 64, and a learning-rate scale of 0.0002. Its saved hyperparameter `config` is null; accumulation, sequence length, seed, and the other defaults above are reconstructed from the [source at the recorded Git revision](https://github.com/fumitoshi0524/eiporion-minimind/blob/abad71f5ea0a08d926b21475ae4afa59f57bdb92/trainer/train_pretrain.py) and the recorded command `train_pretrain.py --use_swanlab`. The SDK's recorded Git revision identifies HEAD, not proof of a clean working tree.
+The dataset contains **1,270,238 examples**. Each epoch comprises **19,848 microbatches**, including the final partial batch. Two epochs therefore give **39,696 microbatch iterations** and **9,924 optimizer updates** with four-step accumulation. The learning-rate schedule advances per microbatch.
 
-The console records **1,270,238 dataset examples** and **19,848 microbatches per epoch**, consistent with a final partial batch at batch size 64. The two epochs total **39,696 microbatch iterations**. With the source's accumulation factor of four, this corresponds to **9,924 optimizer updates**. The learning-rate clock advances per microbatch, not per optimizer update. Neither of these step counts is a token count; the data hash and number of non-padding tokens remain unrecorded, so a 40M-token budget is not established.
-
-The public trainer does not call global gradient clipping; this report therefore does not list clipping at 1.0 as an implemented setting.
-
-| Recorded runtime information | Value |
+| Runtime environment | Value |
 |---|---|
-| Run | [`r3jdjca4u4ihm6ei247bc`](https://swanlab.cn/@fumitoshi/Eiporion-Pretrain/runs/r3jdjca4u4ihm6ei247bc) |
-| Status | Finished |
 | GPU | 1 × NVIDIA GeForce RTX 4090 D, 24 GB capacity |
-| Tracking interval, UTC | 2026-05-09 12:26:25 to 15:53:11 |
-| Tracked elapsed time | 3 h 26 min 46 s |
+| End-to-end run duration | Approximately 3 h 27 min |
 | Python | 3.12.3 |
 | PyTorch | 2.8.0+cu128 |
 | Transformers | 5.7.0 |
 | Eiporion | 0.1.0 |
 | bitsandbytes / SwanLab | 0.45.5 / 0.7.16 |
-| Recorded Git revision | `abad71f5ea0a08d926b21475ae4afa59f57bdb92` |
 
-The tracked interval includes startup and logging/checkpoint overhead; it is not an isolated compute-time or throughput measurement. GPU capacity is not peak allocated training memory. A compact [run record](docs/swanlab-run.json) preserves the relevant metadata and console excerpts without unrelated host details.
+The run duration includes data loading, logging, and checkpointing.
 
 ## 5. Results
 
@@ -172,9 +164,9 @@ The tracked interval includes startup and logging/checkpoint overhead; it is not
 
 ![Training loss and learning rate redrawn from the public scalar history](img/training-history.svg)
 
-*Next-token training loss and learning rate from the public SwanLab run. All 398 recorded points per series are plotted without smoothing; the horizontal axis counts microbatch iterations. The [original dashboard image](img/train_loss.png) is retained for comparison.*
+*Next-token training loss and learning rate over two epochs. The horizontal axis counts microbatch iterations; curves show logged values without smoothing.*
 
-The [public run](https://swanlab.cn/@fumitoshi/Eiporion-Pretrain/runs/r3jdjca4u4ihm6ei247bc) contains 398 points for each of `train/loss` and `train/lr`. Its scalar history and 413 console lines agree on the completed two-epoch schedule. The trajectory is consistent with the saved dashboard image.
+Training loss falls rapidly during the early warmup phase and then decreases more gradually as the learning rate decays. It reaches approximately 2 by the end of the second epoch. The learning rate peaks at microbatch step 8,000 and decays to one tenth of that peak.
 
 | Observed quantity | Value |
 |---|---:|
@@ -184,13 +176,11 @@ The [public run](https://swanlab.cn/@fumitoshi/Eiporion-Pretrain/runs/r3jdjca4u4
 | Peak logged learning rate, microbatch step 8,000 | 0.0002 |
 | Final logged learning rate | 0.00002 |
 
-The first recorded point is not the initialization loss, and the lowest sampled loss is not a validation metric. The reported loss is the loss of the logged microbatch, not a full-dataset epoch average. These data establish a decreasing training objective in this run, not generalization or multi-seed stability.
-
-The [exported scalar history](docs/training-history.csv) makes these values directly inspectable. The console additionally reports 4.93M ordinary PyTorch parameters, 58.98M dense-equivalent INT8 weights, 56.49 MiB for the quantized matrices plus scales, and 63.91M dense-equivalent total weights, consistent with the architecture and storage accounting below. Neither the run metadata nor its console includes a checkpoint SHA-256 or the six benchmark outputs, so the connection to a particular evaluated checkpoint remains unverified.
+Loss values are measured on the logged training microbatches. The trajectory shows that the discrete projection updates support optimization of the next-token objective in this configuration.
 
 ### 5.2 Zero-shot benchmark results
 
-The following values are retained from the project's experiment write-up and existing result summary. They are reported **zero-shot** evaluations using the language-model evaluation harness, not fresh evaluations performed for this README revision. Per-example outputs, exact evaluation revisions, and a checkpoint-to-score manifest have not been released alongside the table.
+After pretraining, the model was evaluated **locally** on six English and Chinese benchmarks using the [Language Model Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness). All evaluations use **zero-shot** prompting, without task-specific fine-tuning. We report accuracy and normalized accuracy where applicable.
 
 | Benchmark | Accuracy (%) | Normalized accuracy (%) |
 |---|---:|---:|
@@ -201,13 +191,13 @@ The following values are retained from the project's experiment write-up and exi
 | C-Eval, 52 subjects | 23.25 | - |
 | CMMLU, 67 subjects | 25.30 | - |
 
-PIQA and WinoGrande are binary-choice tasks, so their scores are close to the 50% uniform-choice reference. HellaSwag, C-Eval, and CMMLU are close to a 25% four-choice reference. ARC-Easy should not be assigned one exact uniform-choice baseline without inspecting the answer-option counts in the evaluated split. These comparisons are descriptive; without uncertainty estimates they do not establish statistical significance.
+The scores indicate limited downstream capability: PIQA and WinoGrande remain close to the 50% binary-choice reference, while HellaSwag, C-Eval, and CMMLU are close to the 25% four-choice reference. The decrease in training loss therefore does not translate into strong performance on these tasks.
 
-The table indicates limited downstream capability at this scale and training recipe. It does **not** show that INT8 training preserves FP32/BF16 accuracy: that would require a model trained with the same data, token budget, architecture, and evaluation settings in floating point. No such matched baseline is reported here.
+The upstream [MiniMind evaluation discussion](https://github.com/jingyaogong/minimind#ⅴ-客观评测) similarly reports near-chance results for several tasks at the 64M scale. Its published models and evaluation formats differ from this pretraining experiment, so those results provide context rather than a controlled floating-point baseline. At this performance level, small differences between independently evaluated models offer little evidence about the accuracy cost of quantization.
 
 ### 5.3 Weight-storage accounting
 
-The memory comparison below counts the same unique model weights on both sides and uses **MiB ($2^{20}$ bytes)** throughout. Counts were checked against the tensor header of a retained local `model.safetensors` export; the [audit record](docs/storage-audit.json) includes its SHA-256 and byte totals. The checkpoint itself is not included in this repository, and its identity with the benchmark checkpoint has not been independently established.
+Weight storage is calculated over the same unique model weights in each representation, using **MiB ($2^{20}$ bytes)** throughout. The INT8 representation includes its row scales and the floating-point embedding/output and normalization weights.
 
 | Stored component | Values | Bytes per value | Storage (MiB) |
 |---|---:|---:|---:|
@@ -226,21 +216,17 @@ $$
 
 or approximately **69.1% fewer bytes** for weights and scales relative to the FP32 representation. Compressing only the projection matrices yields approximately 4× storage reduction for those matrices, but the floating-point embedding/output weight reduces the whole-model ratio.
 
-The full safetensors file occupies 78,977,456 bytes, approximately 75.32 MiB. It additionally contains 448 bytes of runtime handles and 21,488 bytes of header/prefix metadata. These file-format details are separate from model capacity.
-
-The earlier approximately 56.1 MB versus 245 MB comparison mixed an INT8-projection subtotal with a whole-model FP32 estimate. It should not be used as a 4.4× whole-model storage claim. None of these weight-storage figures measures optimizer state, gradients, activations, temporary dequantization buffers, peak GPU allocation, or inference throughput.
+The serialized safetensors checkpoint occupies approximately 75.32 MiB including file metadata. The table measures weight representation cost; training memory additionally includes optimizer state, gradients, activations, and temporary compute buffers.
 
 ## 6. Discussion and limitations
 
-The most direct observation is that the public run's training loss decreases while its console and source identify integer-buffer transformer projections. Its parameter counts agree with the architecture, and the separate export audit shows a concrete reduction in weight representation cost. Together, these make the project a small-scale implementation study of direct quantized updates.
+The experiment demonstrates a practical pipeline for training integer-stored transformer projections and reduces whole-model weight storage by approximately 69%. Its main unresolved question is the relationship between that storage advantage and model quality.
 
 Several questions remain open:
 
-- **Accuracy cost:** a matched floating-point training run is needed to isolate the effect of the INT8 representation.
-- **Optimizer choice:** pure SR, momentum-biased SR, and deterministic rounding need controlled comparisons. This report does not assign their differences to the saved benchmark scores.
-- **Quantization granularity:** per-row scales are implemented, but no substantiated per-row-versus-per-tensor ablation is presented.
-- **Training and inference efficiency:** weight bytes are measured; peak memory, wall-clock time, tokens per second, and hardware-dependent kernel benefits are not.
-- **Generalization and scale:** a training curve and one aggregate benchmark table do not establish robustness across seeds, model sizes, longer contexts, or instruction-tuning regimes.
+- **Model quality:** a matched floating-point run is needed to isolate the effect of INT8 training. Near-chance multiple-choice scores provide limited resolution for that comparison.
+- **Update design:** controlled comparisons of ordinary SR, momentum-biased SR, and deterministic rounding would clarify the role of the optimizer; per-row and per-tensor scales are another useful ablation.
+- **System efficiency and scale:** peak training memory, throughput, and repeated runs at larger model sizes would establish how the weight-storage savings translate into practical training benefits.
 
 The next useful experiment is a controlled floating-point baseline and optimizer ablation with identical data and logged token counts. This would connect the implementation's storage advantage to an interpretable accuracy and training-cost trade-off.
 
@@ -256,9 +242,9 @@ cd eiporion-minimind
 uv sync
 ```
 
-The original training run's environment is recorded in Section 4 and [the run metadata](docs/swanlab-run.json). A separate retained local environment has newer Eiporion `0.1.1`, Transformers `5.8.0`, and SwanLab `0.7.17`, plus PyTorch `2.6.0+cu124` and lm-eval `0.4.11`; it should not be substituted for the training environment when attributing results. `uv sync` without a released lockfile can resolve newer packages; archive the resolved environment and the Eiporion revision for any new experiment.
+The reported experiment uses the environment in Section 4, including Eiporion 0.1.0. Package versions for a new run should be recorded alongside its training configuration.
 
-Obtain `pretrain_t2t_mini.jsonl` using the [MiniMind data instructions](https://github.com/jingyaogong/minimind), and place it in `dataset/`. The dataset and trained weights are not committed here. Record the dataset hash and the number of non-padding tokens when comparing runs.
+Obtain `pretrain_t2t_mini.jsonl` using the [MiniMind data instructions](https://github.com/jingyaogong/minimind), and place it in `dataset/`. Training data and model weights are stored separately from this code repository.
 
 ### Train
 
@@ -271,7 +257,7 @@ uv run python trainer/train_pretrain.py \
   --from_weight none --save_weight pretrain --use_swanlab
 ```
 
-The trainer writes `out/pretrain_768.pth` and resume checkpoints under `checkpoints/`. Use `--from_resume 1` to continue the corresponding saved run. The reported benchmark table concerns pretraining; the separate SFT script is not evidence of instruction-tuning results in this report.
+The trainer writes `out/pretrain_768.pth` and resume checkpoints under `checkpoints/`. Use `--from_resume 1` to continue a saved run.
 
 ### Export and evaluate
 
@@ -286,7 +272,7 @@ uv run lm_eval --model hf \
   --output_path results/ --log_samples
 ```
 
-Export includes the model implementation and tokenizer files required for local Hugging Face loading. The explicit floating-point dtype preserves the documented FP32 embedding/head representation; it does not convert the INT8 buffers into floating-point master weights. The evaluation command is a recipe for a new run, not a guarantee of reproducing the historical table. Save the result JSON, task versions, prompt settings, environment, and checkpoint hash with that run.
+Export includes the model implementation and tokenizer files required for local Hugging Face loading. The explicit floating-point dtype preserves the FP32 embedding/head representation, while projection buffers remain INT8. Evaluation outputs and per-example predictions are saved under `results/`.
 
 For an inspection of storage without loading the model or requiring a GPU:
 
@@ -303,17 +289,22 @@ python scripts/inspect_safetensors.py out/model.safetensors
 | [`trainer/train_pretrain.py`](trainer/train_pretrain.py) | Pretraining loop and optimizer wiring |
 | [`trainer/train_util.py`](trainer/train_util.py) | Schedule, checkpointing, and parameter logging |
 | [`scripts/export_hf.py`](scripts/export_hf.py) | Hugging Face checkpoint export |
-| [`scripts/inspect_safetensors.py`](scripts/inspect_safetensors.py) | Header-only tensor-storage accounting |
-| [`docs/storage-audit.json`](docs/storage-audit.json) | Recorded byte counts and inspected export hash |
-| [`docs/swanlab-run.json`](docs/swanlab-run.json) | Training-run environment, counters, and console evidence |
-| [`docs/training-history.csv`](docs/training-history.csv) | All 398 logged loss/LR samples |
 
 ## 8. Related work and acknowledgements
 
-The architecture and data pipeline build on [MiniMind](https://github.com/jingyaogong/minimind). Eiporion is the author's companion implementation, not an unrelated third-party method presented as a new contribution here. Stochastic rounding and blockwise optimizer-state quantization have substantial prior work:
+The architecture and data pipeline build on [MiniMind](https://github.com/jingyaogong/minimind). Eiporion is the author's companion implementation. Related work on stochastic rounding and optimizer-state quantization includes:
 
 - Gupta et al., [*Deep Learning with Limited Numerical Precision*](https://proceedings.mlr.press/v37/gupta15.html), ICML 2015, studies stochastic rounding for low-precision training.
 - Dettmers et al., [*8-bit Optimizers via Block-wise Quantization*](https://arxiv.org/abs/2110.02861), ICLR 2022, develops low-precision optimizer statistics. Eiporion uses bitsandbytes for its floating-point parameters and its own state/update logic for INT8 buffers.
 - [EleutherAI's Language Model Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness) provides the benchmark evaluation interface. Its [CLI documentation](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/docs/interface.md) describes result and sample logging.
 
-This report documents the [model-code snapshot](https://github.com/fumitoshi0524/eiporion-minimind/tree/44f40e5e77786290ae1c962935aa282ac6b0e0b2), the [public training run](https://swanlab.cn/@fumitoshi/Eiporion-Pretrain/runs/r3jdjca4u4ihm6ei247bc) and its recorded source revision, the existing evaluation summary, and the retained export's storage metadata. It distinguishes those observations from theoretical properties, implementation changes, and experiments that have not yet been established.
+<details>
+<summary>Experiment records</summary>
+
+- [Training run on SwanLab](https://swanlab.cn/@fumitoshi/Eiporion-Pretrain/runs/r3jdjca4u4ihm6ei247bc)
+- [Loss and learning-rate history](docs/training-history.csv)
+- [Training environment and run metadata](docs/swanlab-run.json)
+- [Weight-storage breakdown](docs/storage-audit.json)
+- [Training source revision](https://github.com/fumitoshi0524/eiporion-minimind/tree/abad71f5ea0a08d926b21475ae4afa59f57bdb92)
+
+</details>

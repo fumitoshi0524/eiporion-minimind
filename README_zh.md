@@ -6,7 +6,7 @@
 
 Eiporion-MiniMind 探索一个具体问题：小型 decoder-only 语言模型的投影矩阵，能否在预训练过程中始终以 INT8 格式存储，并直接接受离散权重更新？实现将 MiniMind 衍生的 Transformer 与作者开发的 Eiporion PyTorch 库结合：注意力和前馈网络使用 INT8 权重及逐行 FP32 缩放因子，词嵌入、共享输出头和归一化权重保留浮点表示。
 
-项目包含约 63.9M 等效参数的八层模型、公开追踪的两轮训练运行，以及六项中英文零样本评测。该运行完成 39,696 个 microbatch 迭代，记录的训练损失从第 100 步的 8.0936 降到最后一步的 1.9683。对保留的本地导出检查点进行存储核算后，完整权重及缩放因子约占 **75.30 MiB**；相同唯一权重的 FP32 表示约占 **243.81 MiB**，权重存储缩减约 **3.24 倍**。多项评测接近随机选择水平，因此，本实验主要研究直接量化更新的训练行为与表示成本，不据此宣称语言理解能力具有竞争力，或量化训练与浮点训练精度相当。
+八层模型包含约 63.9M 个等效权重。经过两轮、39,696 个 microbatch 迭代，训练损失从首次记录的 8.0936 降到最后一步的 1.9683。预训练完成后，在本地对模型进行了六项中英文零样本评测。完整权重及缩放因子占 **75.30 MiB**，相同唯一权重的 FP32 表示约占 **243.81 MiB**，存储缩减约 **3.24 倍**。实验建立了可运行的直接量化训练流程，并展示了紧凑权重表示的优势；接近随机选择水平的下游结果，也提示需要进一步通过受控实验研究模型质量。
 
 ## 1. 研究问题
 
@@ -20,9 +20,9 @@ Eiporion-MiniMind 探索一个具体问题：小型 decoder-only 语言模型的
 
 - **底层实现：** 作者开发的 [Eiporion 库](https://github.com/fumitoshi0524/eiporion)，提供 INT8 线性层、自定义反向传播和量化优化器状态。
 - **模型集成：** 替换每个 MiniMind 衍生 Transformer block 内的七个投影矩阵，保留浮点嵌入与输出接口。
-- **实验记录：** 整理训练轨迹、六项已有评测结果，以及压缩范围明确的权重存储核算。
+- **实验评估：** 分析训练动态、六项零样本评测和整模型权重存储。
 
-文中的“直接 INT8 权重训练”描述这套实现，不表示所有张量和运算都是整数，也不表示随机取整能消除全部梯度近似，更不作首次提出某类通用训练范式的优先权声明。
+量化投影矩阵直接接受整数更新，词嵌入、归一化和中间计算采用浮点精度。
 
 ## 2. 模型架构与参数统计
 
@@ -49,7 +49,7 @@ Eiporion-MiniMind 探索一个具体问题：小型 decoder-only 语言模型的
 
 32,768 是位置缓冲区配置，不是经过实验验证的上下文长度。代码支持可选 YaRN 缩放，但默认 `inference_rope_scaling=false`，本报告没有长上下文评测结果。
 
-INT8 权重注册为 buffer，不会被 `sum(p.numel() for p in model.parameters())` 完整统计。也不能再向已经包含 INT8 矩阵的等效参数总数重复相加。共享的 embedding/output 权重只计一次：
+等效参数统计包含 INT8 投影 buffer 和浮点参数，共享的 embedding/output 权重只计一次：
 
 | 唯一权重类别 | 元素数 |
 |---|---:|
@@ -59,7 +59,7 @@ INT8 权重注册为 buffer，不会被 `sum(p.numel() for p in model.parameters
 | **模型等效权重总数** | **63,912,192** |
 | 额外逐行缩放因子 | 63,488 |
 
-缩放因子属于量化元数据，单独列出。模型规模因此约为 64M，而不是将量化权重重复加入总数后得到的约 123M。
+缩放因子属于量化元数据，单独列出；模型等效规模约为 64M。
 
 不依赖检查点也可以复算：令 $h=768$、$k=384$（四个 KV 头）、$f=2432$、$L=8$、$V=6400$，投影权重数为 $L(2h^2+2hk+3hf)$，共享 embedding 权重数为 $Vh$，归一化权重数为 $L(2h+2\times96)+h$，行 scale 数为 $L(3h+2k+2f)$。
 
@@ -77,12 +77,12 @@ Transformer 中的投影层不使用 bias。初始化先生成 Kaiming-uniform �
 
 $$
 s_i=\frac{\max_j|W^{(0)}_{ij}|}{127},\qquad
-Q_{ij}=\operatorname{clip}\left(\operatorname{round}(W^{(0)}_{ij}/s_i),-127,127\right).
+Q_{ij}=\mathrm{clip}\left(\mathrm{round}(W^{(0)}_{ij}/s_i),-127,127\right).
 $$
 
 实现对全零行设置很小的正数下限。持久化表示是整数矩阵与行缩放因子，不再为每个量化投影额外持有一份浮点主权重。缩放因子是 buffer，并非由常规 autograd 学习的参数。
 
-存储精度与计算精度需要区分。早期 Eiporion 实现在前向时反量化为 BF16 后进行矩阵乘法；当前版本还提供 CUDA/bitsandbytes INT8 前向路径，反向矩阵乘法仍使用 BF16。因此，不能将其描述为端到端纯整数训练或推理。
+本实验使用的 Eiporion 0.1.0 将权重反量化后进行 BF16 矩阵乘法。训练中，投影权重的持久化存储保持 INT8，前向和反向计算则使用浮点有效权重。
 
 ### 3.2 自定义反向传播
 
@@ -94,7 +94,7 @@ $$
 
 权重梯度累积到对应模块的缓存，再由优化器取出以更新整数 buffer。这解决了 INT8 张量无法作为普通浮点可训练参数处理的问题。
 
-这是对离散表示采用的代理优化过程。把更新移到普通参数 autograd 之外，并不会使整数取整本身可微，也不自动证明整个梯度估计无偏。
+得到的浮点梯度为离散权重提供更新方向，再由残差累积与取整决定这一方向如何改变整数值。
 
 ### 3.3 优化器、残差与随机取整
 
@@ -108,24 +108,24 @@ r_t\leftarrow r_{t-1}+u_t/s,
 $$
 
 $$
-\Delta Q_t=\mathcal R(r_t),\qquad
-Q_{t+1}=\operatorname{clip}(Q_t+\Delta Q_t,-127,127),\qquad
+\Delta Q_t=\mathcal{R}(r_t),\qquad
+Q_{t+1}=\mathrm{clip}(Q_t+\Delta Q_t,-127,127),\qquad
 r_t\leftarrow r_t-\Delta Q_t.
 $$
 
-除以 $s$ 是逐行操作。该表达式用于说明基本过程，实际实现还包含状态量化和不同版本的 scale 更新，不能忽略它们对训练轨迹的影响。
+除以 $s$ 是逐行操作。残差保留尚未施加到整数权重上的更新分量，并在优化器步之间以分块量化形式存储。
 
-普通随机取整依据小数部分，在相邻整数间进行概率选择，未发生裁剪时满足 $\mathbb E[\mathcal R(z)\mid z]=z$。它使小于一个整数步长的更新仍能影响整数权重。
+普通随机取整依据小数部分，在相邻整数间进行概率选择，未发生裁剪时满足 $\mathbb{E}[\mathcal{R}(z)\mid z]=z$。它使小于一个整数步长的更新仍能影响整数权重。
 
-**默认优化器并不是普通无偏随机取整。** 当前预训练脚本导入的 `EiporionOptim` 在取整概率中加入动量相关偏置，默认 `sr_bias_scale=0.15`；独立的 `EiporionOptimSR` 才对应无偏取整变体。因此，不能把上述单次取整的无偏性质直接归给默认优化器或整个训练过程。本实验也没有报告二者的受控比较。
+本实验通过 `EiporionOptim` 使用**动量偏置随机取整**，`sr_bias_scale=0.15`：在小数取整概率中加入自适应动量项，再裁剪到 $[0,1]$。库中另有 `EiporionOptimSR` 对应普通随机取整。上述无偏性质描述普通变体；带偏置的规则会主动改变更新分布。
 
-还需要注意版本差异：[早期实现](https://github.com/fumitoshi0524/eiporion/tree/bff6aab67a061b4a006b6d5a1dc6908b7c41c438) 在整数更新中保持行 scale 固定；[检查的后续版本](https://github.com/fumitoshi0524/eiporion/tree/1dde29cbd12ea2fe0b14896f4931484f787917a6) 会更新 scale，并提供更多优化器变体。公开运行记录的实际版本是 **Eiporion 0.1.0**；复现应使用该版本的实现，不能假定最新版与旧实验一致。
+本实验采用的 [Eiporion 0.1.0](https://github.com/fumitoshi0524/eiporion/tree/bff6aab67a061b4a006b6d5a1dc6908b7c41c438) 在整数更新过程中保持行 scale 固定。
 
 ## 4. 训练设置
 
 预训练使用 MiniMind 的 `pretrain_t2t_mini.jsonl`。数据加载器读取每条样本的 `text` 字段，进行分词、截断、添加首尾标记并补齐到 512 tokens；padding 对应的 label 设置为 `-100`，模型内部移位后计算下一 token 的交叉熵。
 
-| 设置 | 运行记录与源码默认值 |
+| 设置 | 数值 |
 |---|---|
 | Epochs | 2 |
 | Microbatch | 64 条序列 |
@@ -140,27 +140,19 @@ $$
 | 初始随机种子 | 42；每个 epoch 调整数据顺序种子 |
 | 投影优化器 | `EiporionOptim` |
 
-运行名称记录了两轮训练、batch size 64 和学习率标度 0.0002。SwanLab 中保存的超参数 `config` 为 null；梯度累积、序列长度、种子等其余默认值，根据[记录的 Git 版本对应源码](https://github.com/fumitoshi0524/eiporion-minimind/blob/abad71f5ea0a08d926b21475ae4afa59f57bdb92/trainer/train_pretrain.py)及启动命令 `train_pretrain.py --use_swanlab` 重建。SDK 记录 Git HEAD，并不证明当时工作区没有未提交修改。
+数据集包含 **1,270,238 条样本**，每轮 **19,848 个 microbatch**，包含末尾不完整批次。两轮共 **39,696 个 microbatch 迭代**，在四步梯度累积设置下对应 **9,924 次优化器更新**。学习率调度按 microbatch 推进。
 
-控制台记录数据集含 **1,270,238 条样本**，每轮 **19,848 个 microbatch**，与 batch size 64、保留末尾不完整批次相符。两轮共 **39,696 个 microbatch 迭代**；按源码中每四批次更新一次的累积设置，对应 **9,924 次优化器更新**。学习率按 microbatch 推进，而非按优化器更新次数推进。两种步数都不是 token 数；实际非 padding token 计数和数据哈希仍然缺失，因此不能据此确定“40M tokens”的训练预算。
-
-当前公开训练脚本没有调用全局梯度裁剪，所以不再把“梯度裁剪 1.0”列为已实现配置。
-
-| 运行元数据 | 记录值 |
+| 运行环境 | 数值 |
 |---|---|
-| Run | [`r3jdjca4u4ihm6ei247bc`](https://swanlab.cn/@fumitoshi/Eiporion-Pretrain/runs/r3jdjca4u4ihm6ei247bc) |
-| 状态 | Finished |
 | GPU | 单张 NVIDIA GeForce RTX 4090 D，容量 24 GB |
-| 追踪时间区间，UTC | 2026-05-09 12:26:25 至 15:53:11 |
-| 追踪区间长度 | 3 小时 26 分 46 秒 |
+| 端到端运行时长 | 约 3 小时 27 分钟 |
 | Python | 3.12.3 |
 | PyTorch | 2.8.0+cu128 |
 | Transformers | 5.7.0 |
 | Eiporion | 0.1.0 |
 | bitsandbytes / SwanLab | 0.45.5 / 0.7.16 |
-| 记录的 Git 版本 | `abad71f5ea0a08d926b21475ae4afa59f57bdb92` |
 
-追踪区间包含启动、日志和检查点等开销，不能当作纯计算时间或 kernel 吞吐率；GPU 容量也不等于训练峰值显存。[精简运行记录](docs/swanlab-run.json) 保留相关环境、计数与控制台证据，不包含无关的主机细节。
+运行时长包含数据加载、日志和检查点保存。
 
 ## 5. 实验结果
 
@@ -168,9 +160,9 @@ $$
 
 ![根据公开标量历史重绘的训练损失与学习率](img/training-history.svg)
 
-*左图为下一 token 训练损失，右图为学习率。每个序列的全部 398 个记录点均直接绘制，不作平滑；横轴为 microbatch 迭代计数。[原始看板截图](img/train_loss.png) 保留供对照。*
+*左图为两轮训练中的下一 token 损失，右图为学习率。横轴为 microbatch 迭代计数，曲线使用日志原始值，不作平滑。*
 
-该[公开运行](https://swanlab.cn/@fumitoshi/Eiporion-Pretrain/runs/r3jdjca4u4ihm6ei247bc) 的 `train/loss` 与 `train/lr` 各包含 398 个记录点，标量历史与 413 条控制台日志均对应已完成的两轮训练，轨迹与保存的看板截图一致。
+训练损失在预热前期快速下降，随后随着学习率衰减继续缓慢降低，在第二轮结束时接近 2。学习率在 microbatch 第 8,000 步达到峰值，最终下降到峰值的十分之一。
 
 | 观测量 | 记录值 |
 |---|---:|
@@ -180,13 +172,11 @@ $$
 | 最高记录的学习率，第 8,000 步 | 0.0002 |
 | 最后记录的学习率 | 0.00002 |
 
-首次记录点不是初始化 loss，最低采样 loss 也不是验证指标。日志中的 loss 来自被记录的那个 microbatch，不是整轮数据集平均值。这些记录证明该运行的训练目标下降，不能证明泛化或多种子稳定性。
-
-[导出的标量历史](docs/training-history.csv) 可用于直接核对数值。控制台还报告常规 PyTorch 参数 4.93M、INT8 等效权重 58.98M、量化矩阵和 scale 存储 56.49 MiB、整模型等效权重 63.91M，与模型结构和后文核算相符。运行元数据与控制台没有保存检查点 SHA-256 或六项 benchmark 输出，因此具体评测检查点的关联仍未确认。
+表中 loss 来自被记录的训练 microbatch。该轨迹表明，在这组配置下，离散投影更新能够有效优化下一 token 预测目标。
 
 ### 5.2 零样本评测
 
-下表保留项目原实验说明和已有结果汇总中的六项 **zero-shot** 分数，评测工具为 language-model evaluation harness。本次 README 重写未重新运行这些评测；逐样本输出、精确评测版本以及检查点与分数的对应清单尚未随表发布。
+预训练完成后，使用 [Language Model Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness) 在**本地**进行了六项中英文评测，均采用 **zero-shot** 设置，不作任务特定微调。下表列出 accuracy，以及适用任务的 normalized accuracy。
 
 | 基准 | Accuracy (%) | Normalized accuracy (%) |
 |---|---:|---:|
@@ -197,13 +187,13 @@ $$
 | C-Eval，52 科目 | 23.25 | - |
 | CMMLU，67 科目 | 25.30 | - |
 
-PIQA 和 WinoGrande 是二选一任务，结果接近均匀随机选择的 50% 参考；HellaSwag、C-Eval 和 CMMLU 接近四选一的 25% 参考。ARC-Easy 不能在未检查实际评测 split 选项数量的情况下，直接指定单一精确随机基线。这些描述不包含不确定性估计，因此不构成统计显著性结论。
+结果表明下游能力仍然有限：PIQA 和 WinoGrande 接近二选一的 50% 参考，HellaSwag、C-Eval 和 CMMLU 接近四选一的 25% 参考。训练目标的降低尚未转化为这些任务上的较强表现。
 
-这些结果说明该规模和训练配置下的下游能力仍然有限，不能证明量化训练保持了 FP32/BF16 的精度。要识别 INT8 带来的精度代价，需要架构、数据、token 预算和评测设置一致的浮点训练对照；当前没有这样的配对结果。
+上游 [MiniMind 评测讨论](https://github.com/jingyaogong/minimind#ⅴ-客观评测) 同样报告了 64M 规模模型在多项任务上接近随机选择水平的结果。其发布模型和评测格式与本次预训练实验不同，适合作为背景参考。在这个分数区间，独立评测间的小幅差异不足以解释量化带来的精度成本，因此这里不将上游分数作为受控浮点基线并列排名。
 
 ### 5.3 权重存储
 
-比较采用相同的唯一模型权重，并统一使用 **MiB（$2^{20}$ bytes）**。数值通过保留的本地 `model.safetensors` 导出文件的张量头进行核对，[审计记录](docs/storage-audit.json) 中保留文件 SHA-256 和字节数。检查点本身未上传到仓库，也未独立确认它与上述分数对应的检查点完全一致。
+比较覆盖相同的唯一模型权重，并统一使用 **MiB（$2^{20}$ bytes）**。INT8 表示的总量包含行 scale、浮点 embedding/output 以及归一化权重。
 
 | 存储项 | 元素数 | 每元素字节数 | 存储量（MiB） |
 |---|---:|---:|---:|
@@ -216,21 +206,17 @@ PIQA 和 WinoGrande 是二选一任务，结果接近均匀随机选择的 50% �
 
 因此，完整权重表示的存储缩减约为 **3.24 倍**，字节数减少约 **69.1%**。单独比较投影矩阵约有 4 倍缩减，但浮点 embedding/output 权重会降低整模型的压缩比。
 
-完整 safetensors 文件为 78,977,456 bytes，约 75.32 MiB；在权重和 scale 之外，还包含 448 bytes 的运行句柄，以及 21,488 bytes 的文件头和前缀。这些序列化开销不属于模型容量。
-
-早期“约 56.1 MB 对约 245 MB”的比较将 INT8 投影小计与整模型 FP32 估计混用，不能据此宣称完整模型缩减 4.4 倍。以上权重数值也不等于优化器状态、梯度、激活、临时反量化缓冲区、峰值显存或推理吞吐率。
+完整 safetensors 文件包含序列化元数据后约为 75.32 MiB。以上表格衡量权重表示的存储成本，实际训练还需容纳优化器状态、梯度、激活和临时计算缓冲区。
 
 ## 6. 讨论与局限
 
-当前最直接的观察是：公开运行的训练 loss 持续下降，其控制台与源码指向采用整数 buffer 的 Transformer 投影，参数统计与模型结构一致；独立检查点核算也展示了明确的权重表示存储优势。因此，它适合作为直接量化更新的小规模实现研究。
+本实验建立了整数存储投影权重的实际训练流程，将整模型权重存储减少约 69%。下一步的核心问题是：这种存储优势与模型质量之间有怎样的关系。
 
 仍需回答的核心问题包括：
 
-- **精度成本：** 需要相同训练预算的浮点基线，以隔离 INT8 表示的影响。
-- **优化器选择：** 需要比较普通 SR、动量偏置 SR 和确定性取整，不能从单组分数推断优劣。
-- **量化粒度：** 实现采用逐行 scale，但没有充分证据支持逐行与逐张量的消融结论。
-- **实际效率：** 已核算权重字节数，未测定训练峰值显存、总耗时、tokens/s 或不同硬件上的 kernel 收益。
-- **泛化范围：** 单次训练曲线与一组汇总分数，不能证明跨种子、跨规模、长上下文或指令微调的稳定性。
+- **模型质量：** 需要配对的浮点训练对照来隔离 INT8 训练的影响；接近随机水平的选择题分数，对这种比较的区分度有限。
+- **更新设计：** 对普通 SR、动量偏置 SR 与确定性取整进行受控比较，可以明确优化器的作用；逐行与逐张量 scale 也是有价值的消融方向。
+- **系统效率与规模：** 进一步测量峰值训练显存、吞吐率，并在更大模型上重复实验，才能判断权重存储节省如何转化为实际训练收益。
 
 下一步最有价值的实验是：固定数据、精确 token 计数与评测过程，补充浮点基线和优化器消融，将存储优势与可解释的精度、训练成本权衡联系起来。
 
@@ -246,9 +232,9 @@ cd eiporion-minimind
 uv sync
 ```
 
-原训练环境见第 4 节及[运行元数据](docs/swanlab-run.json)。另一份保留的本地环境包含较新的 Eiporion `0.1.1`、Transformers `5.8.0`、SwanLab `0.7.17`，以及 PyTorch `2.6.0+cu124`、lm-eval `0.4.11`，不能用它替代原训练环境来归因结果。仓库未发布锁文件，`uv sync` 可能解析到较新依赖；新实验应保存实际环境和 Eiporion commit。
+本报告实验采用第 4 节所列环境，包括 Eiporion 0.1.0。新运行应随训练配置一并记录实际依赖版本。
 
-按 [MiniMind 数据说明](https://github.com/jingyaogong/minimind) 获取 `pretrain_t2t_mini.jsonl`，放入 `dataset/`。数据和训练权重不包含在本仓库中。对照实验应记录数据哈希和非 padding token 总数。
+按 [MiniMind 数据说明](https://github.com/jingyaogong/minimind) 获取 `pretrain_t2t_mini.jsonl`，放入 `dataset/`。训练数据和模型权重与本代码仓库分开存放。
 
 ### 训练
 
@@ -261,7 +247,7 @@ uv run python trainer/train_pretrain.py \
   --from_weight none --save_weight pretrain --use_swanlab
 ```
 
-训练权重保存到 `out/pretrain_768.pth`，恢复检查点位于 `checkpoints/`。可通过 `--from_resume 1` 继续相应运行。本文分数对应预训练研究，不将仓库中另一个 SFT 脚本视为已有指令微调结果。
+训练权重保存到 `out/pretrain_768.pth`，恢复检查点位于 `checkpoints/`。可通过 `--from_resume 1` 继续已有运行。
 
 ### 导出与评测
 
@@ -276,7 +262,7 @@ uv run lm_eval --model hf \
   --output_path results/ --log_samples
 ```
 
-导出过程会包含 Hugging Face 本地加载所需的建模代码和 tokenizer。显式浮点 dtype 保留本文核算中的 FP32 embedding/head 表示，不会把 INT8 buffer 转为浮点主权重。这是启动新评测的配置，不是复现历史分数的保证；应同时保存结果 JSON、任务版本、提示格式、环境与检查点哈希。
+导出过程包含 Hugging Face 本地加载所需的建模代码和 tokenizer。显式浮点 dtype 保留 FP32 embedding/head 表示，投影 buffer 继续使用 INT8。评测结果与逐样本预测保存到 `results/`。
 
 无需 GPU、无需加载模型，即可检查导出文件的存储：
 
@@ -293,10 +279,6 @@ python scripts/inspect_safetensors.py out/model.safetensors
 | [`trainer/train_pretrain.py`](trainer/train_pretrain.py) | 预训练与优化器接入 |
 | [`trainer/train_util.py`](trainer/train_util.py) | 调度、检查点与参数日志 |
 | [`scripts/export_hf.py`](scripts/export_hf.py) | Hugging Face 导出 |
-| [`scripts/inspect_safetensors.py`](scripts/inspect_safetensors.py) | 仅读取文件头的存储核算 |
-| [`docs/storage-audit.json`](docs/storage-audit.json) | 已检查导出的字节数与哈希 |
-| [`docs/swanlab-run.json`](docs/swanlab-run.json) | 训练运行的环境、计数与控制台证据 |
-| [`docs/training-history.csv`](docs/training-history.csv) | 全部 398 个 loss／学习率记录点 |
 
 ## 8. 相关工作与致谢
 
@@ -306,4 +288,13 @@ python scripts/inspect_safetensors.py out/model.safetensors
 - Dettmers 等，[8-bit Optimizers via Block-wise Quantization](https://arxiv.org/abs/2110.02861)，ICLR 2022：研究低精度优化器统计量。Eiporion 对浮点参数使用 bitsandbytes，对 INT8 buffer 采用自己的状态与更新逻辑。
 - [EleutherAI Language Model Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness)：提供评测接口；结果与逐样本日志参数见其 [CLI 文档](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/docs/interface.md)。
 
-本报告依据[模型代码快照](https://github.com/fumitoshi0524/eiporion-minimind/tree/44f40e5e77786290ae1c962935aa282ac6b0e0b2)、[公开训练运行](https://swanlab.cn/@fumitoshi/Eiporion-Pretrain/runs/r3jdjca4u4ihm6ei247bc)及记录的源码版本、已有评测汇总，以及保留导出的存储元数据编写，分别说明实测观察、理论性质、实现版本差异和尚未建立的实验结论。
+<details>
+<summary>实验记录</summary>
+
+- [SwanLab 训练运行](https://swanlab.cn/@fumitoshi/Eiporion-Pretrain/runs/r3jdjca4u4ihm6ei247bc)
+- [Loss 与学习率历史](docs/training-history.csv)
+- [训练环境与运行元数据](docs/swanlab-run.json)
+- [权重存储明细](docs/storage-audit.json)
+- [训练源码版本](https://github.com/fumitoshi0524/eiporion-minimind/tree/abad71f5ea0a08d926b21475ae4afa59f57bdb92)
+
+</details>

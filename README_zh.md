@@ -2,13 +2,37 @@
 
 [English report](README.md)
 
+## 先试一下
+
+**[打开浏览器续写体验 ↗](https://fumitoshi0524.github.io/eiporion-minimind/)** · [模型权重与 tokenizer](demo/model/) · [生成脚本](scripts/generate.py)
+
+模型约 64M 参数，完整权重文件 **75.32 MiB**。点击页面中的“加载模型”后，权重下载到读者设备，由 WebGPU 在本机生成文字，无需登录或提供 API key。需要支持 WebGPU 的浏览器；浏览器实现采用 FP32 计算，保留 INT8 投影权重存储。
+
+当前发布的是**预训练版**，适合输入一个开头并观察续写。它尚未经过对话指令微调，因此页面采用文本续写形式。
+
+### 一段实际生成
+
+**输入：** 人工智能的发展
+
+**续写节选：**
+
+> 已经成为当今科技领域最重要的研究方向。随着人工智能技术的不断发展，人工智能已经成为当前科技领域最重要的研究方向之一。人工智能技术在医疗、金融、教育、交通等领域都得到了广泛应用，为人类生活带来极大的便利。
+
+这段文字由本地 PyTorch 版本生成，原始输出与采样参数见[生成记录](docs/generation-example.json)。也可以克隆仓库后本地生成：
+
+```bash
+uv sync
+uv run python scripts/generate.py --model-dir demo/model \
+  --prompt "人工智能的发展" --max-new-tokens 96 --seed 42
+```
+
 ## 摘要
 
 Eiporion-MiniMind 探索一个具体问题：小型 decoder-only 语言模型的投影矩阵，能否在预训练过程中始终以 INT8 格式存储，并直接接受离散权重更新？实现将 MiniMind 衍生的 Transformer 与作者开发的 Eiporion PyTorch 库结合：注意力和前馈网络使用 INT8 权重及逐行 FP32 缩放因子，词嵌入、共享输出头和归一化权重保留浮点表示。
 
 **重点在于训练期间的权重存储：投影矩阵在优化过程中实际保存为 INT8，不另外保留 FP16／FP32 主权重副本。本文实现通过 BF16 矩阵乘法完成训练，不依赖原生 FP4／FP8 训练指令。**
 
-八层模型包含约 63.9M 个等效权重。经过两轮、39,696 个 microbatch 迭代，训练损失从首次记录的 8.0936 降到最后一步的 1.9683。预训练完成后，在本地对模型进行了六项中英文零样本评测。完整权重及缩放因子占 **75.30 MiB**，相同唯一权重的 FP32 表示约占 **243.81 MiB**，存储缩减约 **3.24 倍**。实验建立了可运行的直接量化训练流程，并展示了紧凑权重表示的优势；接近随机选择水平的下游结果，也提示需要进一步通过受控实验研究模型质量。
+八层模型包含约 63.9M 个等效权重。经过两轮、39,696 个 microbatch 迭代，训练损失从首次记录的 8.0936 降到最后一步的 1.9683。完整权重及缩放因子占 **75.30 MiB**，相同唯一权重的 FP32 表示约占 **243.81 MiB**，存储缩减约 **3.24 倍**。实验建立了可运行的直接量化训练流程；读者可以下载权重，或直接在浏览器中查看模型的文本续写。
 
 ## 1. 研究问题
 
@@ -26,7 +50,7 @@ Eiporion-MiniMind 探索一个具体问题：小型 decoder-only 语言模型的
 
 - **底层实现：** 作者开发的 [Eiporion 库](https://github.com/fumitoshi0524/eiporion)，提供 INT8 线性层、自定义反向传播和量化优化器状态。
 - **模型集成：** 替换每个 MiniMind 衍生 Transformer block 内的七个投影矩阵，保留浮点嵌入与输出接口。
-- **实验评估：** 分析训练动态、六项零样本评测和整模型权重存储。
+- **可运行模型：** 提供训练轨迹、整模型存储分析、公开权重与浏览器续写体验。
 
 量化投影矩阵直接接受整数更新，词嵌入、归一化和中间计算采用浮点精度。
 
@@ -58,9 +82,9 @@ Eiporion-MiniMind 探索一个具体问题：小型 decoder-only 语言模型的
 | 配置的位置缓冲区 | 32,768 个位置 |
 | 预训练序列长度 | 512 tokens |
 
-![模型架构](img/Model_Structure.png)
+![模型架构](img/model-and-update.svg)
 
-*架构概览；具体精度与存储范围以上表及下文实现说明为准。*
+*左：模型结构；右：单个量化投影的更新闭环。绿色表示训练期间保留的紧凑状态，灰色表示浮点计算。*
 
 32,768 是位置缓冲区配置，不是经过实验验证的上下文长度。代码支持可选 YaRN 缩放，但默认 `inference_rope_scaling=false`，本报告没有长上下文评测结果。
 
@@ -195,22 +219,7 @@ $$
 
 表中 loss 来自被记录的训练 microbatch。该轨迹表明，在这组配置下，离散投影更新能够有效优化下一 token 预测目标。
 
-### 5.2 零样本评测
-
-预训练完成后，使用 [Language Model Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness) 在**本地**进行了六项中英文评测，均采用 **zero-shot** 设置，不作任务特定微调。下表列出 accuracy，以及适用任务的 normalized accuracy。
-
-| 基准 | Accuracy (%) | Normalized accuracy (%) |
-|---|---:|---:|
-| ARC-Easy | 28.45 | 28.32 |
-| HellaSwag | 27.32 | 28.58 |
-| PIQA | 52.23 | 50.82 |
-| WinoGrande | 52.64 | - |
-| C-Eval，52 科目 | 23.25 | - |
-| CMMLU，67 科目 | 25.30 | - |
-
-结果表明下游能力仍然有限：PIQA 和 WinoGrande 接近二选一的 50% 参考，HellaSwag、C-Eval 和 CMMLU 接近四选一的 25% 参考。训练目标的降低尚未转化为这些任务上的较强表现。
-
-### 5.3 权重存储
+### 5.2 权重存储
 
 比较覆盖相同的唯一模型权重，并统一使用 **MiB（$2^{20}$ bytes）**。INT8 表示的总量包含行 scale、浮点 embedding/output 以及归一化权重。
 
@@ -235,7 +244,7 @@ $$
 
 仍需回答的核心问题包括：
 
-- **模型质量：** 需要配对的浮点训练对照来隔离 INT8 训练的影响；接近随机水平的选择题分数，对这种比较的区分度有限。
+- **模型质量：** 需要配对的浮点训练对照来隔离 INT8 训练的影响；当前公开权重只有预训练阶段，交互方式为文本续写。
 - **更新设计：** 对普通 SR、动量偏置 SR 与确定性取整进行受控比较，可以明确优化器的作用；逐行与逐张量 scale 也是有价值的消融方向。
 - **系统效率与规模：** 进一步测量峰值训练显存、吞吐率，并在更大模型上重复实验，才能判断权重存储节省如何转化为实际训练收益。
 
@@ -255,7 +264,7 @@ uv sync
 
 本报告实验采用第 4 节所列环境，包括 Eiporion 0.1.0。新运行应随训练配置一并记录实际依赖版本。
 
-按 [MiniMind 数据说明](https://github.com/jingyaogong/minimind) 获取 `pretrain_t2t_mini.jsonl`，放入 `dataset/`。训练数据和模型权重与本代码仓库分开存放。
+按 [MiniMind 数据说明](https://github.com/jingyaogong/minimind) 获取 `pretrain_t2t_mini.jsonl`，放入 `dataset/`。公开的预训练权重与 tokenizer 位于 [`demo/model/`](demo/model/)，训练数据需要另行获取。
 
 ### 训练
 
@@ -270,20 +279,17 @@ uv run python trainer/train_pretrain.py \
 
 训练权重保存到 `out/pretrain_768.pth`，恢复检查点位于 `checkpoints/`。可通过 `--from_resume 1` 继续已有运行。
 
-### 导出与评测
+### 导出与生成
 
 ```bash
 uv run python scripts/export_hf.py \
   --weight pretrain --hidden-size 768 --num-hidden-layers 8 --save-dir out
 
-uv run lm_eval --model hf \
-  --model_args pretrained=./out,trust_remote_code=True,dtype=float32 \
-  --tasks arc_easy,hellaswag,piqa,winogrande,ceval-valid,cmmlu \
-  --num_fewshot 0 --batch_size 8 \
-  --output_path results/ --log_samples
+uv run python scripts/generate.py --model-dir out \
+  --prompt "人工智能的发展" --max-new-tokens 128
 ```
 
-导出过程包含 Hugging Face 本地加载所需的建模代码和 tokenizer。显式浮点 dtype 保留 FP32 embedding/head 表示，投影 buffer 继续使用 INT8。评测结果与逐样本预测保存到 `results/`。
+导出包含本地加载所需的配置、权重和 tokenizer。生成脚本保留 FP32 embedding/head 与 INT8 投影 buffer；默认按预训练文本续写处理输入。`--mode chat` 仅供之后的对话微调权重使用。
 
 无需 GPU、无需加载模型，即可检查导出文件的存储：
 
@@ -307,7 +313,18 @@ python scripts/inspect_safetensors.py out/model.safetensors
 
 ### 直接量化更新
 
-- **Zhao 等，[Direct Quantized Training of Language Models with Stochastic Rounding](https://arxiv.org/abs/2412.04787)，ACML 2025**（[代码](https://github.com/KYuuto1006/DQT)）。这是最直接的方法前作，通过随机取整实现不持有额外高精度隐含矩阵的更新。其公开[线性层](https://github.com/KYuuto1006/DQT/blob/767a724ed3547b926f785a89613eda00bfa730b3/utils_quant.py) 继承 `nn.Linear`，[取整实现](https://github.com/KYuuto1006/DQT/blob/767a724ed3547b926f785a89613eda00bfa730b3/custom_optimizer.py) 将结果转回输入 dtype。Eiporion 显式以 INT8 buffer 保存投影矩阵，并结合分块量化优化器状态执行更新。
+- **Zhao 等，[Direct Quantized Training of Language Models with Stochastic Rounding](https://arxiv.org/abs/2412.04787)，ACML 2025**（[代码](https://github.com/KYuuto1006/DQT)）。DQT 研究直接在量化网格上更新权重，使用随机取整避免小更新被确定性取整抹去。本项目与其共享这一数值方法背景，进一步实现了**从权重存储、梯度传递到优化器常驻状态的整数训练路径**。
+
+具体差异体现在四个相互配合的环节：
+
+| 环节 | DQT 公开参考实现 | Eiporion 的实现 |
+|---|---|---|
+| 权重容器 | `nn.Linear` 的浮点参数承载量化网格值；取整后转回输入 dtype | `torch.int8` buffer 保存整数矩阵，另存逐行 FP32 scale；58.98M 投影权重实际占用 56.25 MiB |
+| 梯度与更新接口 | 沿用浮点参数的梯度与优化器接口 | 自定义反向传播缓存有效权重梯度，优化器将更新施加到整数 buffer |
+| 低于整数步长的更新 | 随机取整直接权重更新 | 在整数坐标中累积更新残差，再进行动量偏置随机取整，并携带剩余更新 |
+| 优化器常驻状态 | 所引用的 `MyAdamW` 路径创建浮点矩状态 | 一阶矩、二阶矩和更新残差均以分块 8-bit 状态持久化 |
+
+区别因此不限于取整函数：Eiporion 将实际整数权重、残差更新和量化优化器状态组合到同一训练流程，并集成为可训练、可导出、可交互运行的语言模型。BF16 GEMM 用于执行浮点计算，无需原生 FP4／FP8 训练指令。上述比较对应所引用的 [DQT 线性层](https://github.com/KYuuto1006/DQT/blob/767a724ed3547b926f785a89613eda00bfa730b3/utils_quant.py) 和 [优化器](https://github.com/KYuuto1006/DQT/blob/767a724ed3547b926f785a89613eda00bfa730b3/custom_optimizer.py)；量化优化器状态并非 DQT 论文的主要研究目标。
 
 ### 隐含权重与计算精度
 
@@ -319,7 +336,6 @@ python scripts/inspect_safetensors.py out/model.safetensors
 
 - Gupta 等，[Deep Learning with Limited Numerical Precision](https://proceedings.mlr.press/v37/gupta15.html)，ICML 2015：研究低精度训练中的随机取整。
 - Dettmers 等，[8-bit Optimizers via Block-wise Quantization](https://arxiv.org/abs/2110.02861)，ICLR 2022：研究低精度优化器统计量。Eiporion 对浮点参数使用 bitsandbytes，对 INT8 buffer 采用自己的状态与更新逻辑。
-- [EleutherAI Language Model Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness)：提供评测接口；结果与逐样本日志参数见其 [CLI 文档](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/docs/interface.md)。
 
 <details>
 <summary>实验记录</summary>

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Run Eiporion-MiniMind locally in your browser. A 64M language model with directly trained INT8 projection weights.">
+  <title>Eiporion — Text playground</title>
+  <style>
+    :root{color-scheme:light;--ink:#222b34;--sub:#687078;--line:#e1e4e6;--accent:#28796b;--paper:#fcfcfa}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.7 system-ui,-apple-system,"Segoe UI",sans-serif}
+    main{max-width:900px;margin:auto;padding:36px 28px 56px}nav{display:flex;justify-content:space-between;align-items:center;font-size:13px}nav a{color:var(--sub);text-decoration:none}nav span{letter-spacing:.14em;font-weight:650}
+    header{margin:58px 0 32px}h1{font:500 clamp(38px,6vw,56px)/1.1 Georgia,serif;margin:0 0 18px;letter-spacing:-.04em}header p{margin:0;color:var(--sub);max-width:680px}small{color:var(--sub)}
+    .facts{display:flex;gap:22px;margin:22px 0;color:var(--accent);font-size:12px;flex-wrap:wrap}.panel{border:1px solid var(--line);border-radius:12px;background:white;overflow:hidden}
+    .toolbar{display:flex;align-items:center;gap:16px;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--line)}button{font:inherit;border:1px solid var(--line);background:white;color:var(--ink);padding:8px 15px;border-radius:7px;cursor:pointer}button:hover:not(:disabled){border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}.primary{background:var(--accent);border-color:var(--accent);color:white}
+    #status{font-size:12px;color:var(--sub);line-height:1.5}.editor{padding:22px}label{font-size:12px;font-weight:650;display:block;margin-bottom:10px}textarea{resize:vertical;width:100%;min-height:112px;border:0;outline:none;background:transparent;font:17px/1.8 inherit;color:var(--ink)}textarea:focus-visible{outline:2px solid #b6d6ce;outline-offset:6px}select,input{accent-color:var(--accent);font:inherit}select{border:1px solid var(--line);border-radius:5px;background:white;padding:4px 8px}
+    .examples{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 20px}.examples button{font-size:12px;color:var(--sub);padding:4px 10px;background:#f8f9f7}.settings{display:flex;gap:24px;align-items:center;flex-wrap:wrap;border-top:1px solid var(--line);padding:16px 20px}.settings label{display:inline;margin:0;font-weight:400;color:var(--sub);font-size:12px}.settings input{width:95px;vertical-align:middle}.actions{margin-left:auto;display:flex;gap:8px}
+    .result{border-top:1px solid var(--line);padding:22px;min-height:180px}.result h2{font-size:12px;font-weight:650;margin:0 0 15px}.result p{white-space:pre-wrap;overflow-wrap:anywhere;font-size:17px;line-height:1.9;margin:0}#prefix{color:var(--sub)}#output{color:var(--ink)}#empty{color:#90969c;font-size:14px}footer{margin-top:25px;color:var(--sub);font-size:12px;display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap}footer a{color:var(--accent)}#error{color:#a33b36;font-size:13px;white-space:pre-wrap;margin-top:12px}#stats{margin-top:18px;color:var(--sub);font-size:11px}
+    @media(max-width:600px){main{padding:24px 18px}header{margin-top:40px}.toolbar{align-items:flex-start}.settings{gap:15px}.actions{width:100%;margin-left:0}.editor,.result{padding:18px}}
+  </style>
+</head>
+<body><main>
+  <nav><span>EIPORION / MINIMIND</span><a href="https://github.com/fumitoshi0524/eiporion-minimind">Repository ↗</a></nav>
+  <header><h1>A small model.<br>Your next words.</h1><p>输入一段开头，看看模型会怎样续写。权重在你的浏览器中加载，生成在本机完成。</p>
+    <div class="facts"><span>64M PARAMETERS</span><span>INT8 PROJECTION WEIGHTS</span><span>75.32 MiB DOWNLOAD</span></div>
+  </header>
+  <section class="panel" aria-label="Text generation playground">
+    <div class="toolbar"><div id="status" role="status" aria-live="polite">尚未加载 · 需要支持 WebGPU 的浏览器</div><button id="load" class="primary">加载模型</button></div>
+    <div class="editor"><label for="prompt">文本开头 / PROMPT</label><textarea id="prompt" maxlength="1500" spellcheck="false">人工智能的发展</textarea>
+      <div class="examples"><button data-prompt="人工智能的发展">人工智能的发展</button><button data-prompt="在一个安静的夜晚，">在一个安静的夜晚，</button><button data-prompt="学习一门新的语言，首先需要">学习一门新的语言，首先需要</button></div>
+      <small>这是预训练模型，展示文本续写；尚未进行对话指令微调。</small></div>
+    <div class="settings"><label for="length">续写长度 <select id="length"><option value="64">64 tokens</option><option value="128" selected>128 tokens</option><option value="256">256 tokens</option></select></label>
+      <label for="temperature">随机程度 <input id="temperature" type="range" min="0.2" max="1.2" step="0.1" value="0.8"> <span id="tempValue">0.8</span></label>
+      <div class="actions"><button id="stop" disabled>停止</button><button id="generate" class="primary" disabled>开始续写</button></div></div>
+    <div class="result"><h2>续写 / CONTINUATION</h2><p id="empty">生成的文字会显示在这里。</p><p><span id="prefix"></span><span id="output"></span></p><div id="stats"></div><div id="error" role="alert"></div></div>
+  </section>
+  <footer><span>WebGPU · 本地推理 · FP32 计算 / INT8 权重存储</span><span><a href="https://github.com/fumitoshi0524/eiporion-minimind/blob/main/README_zh.md">阅读研究报告 ↗</a></span></footer>
+</main><script type="module" src="app.js"></script></body></html>

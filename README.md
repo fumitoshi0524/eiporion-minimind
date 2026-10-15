@@ -2,13 +2,37 @@
 
 [中文报告](README_zh.md)
 
+## Try the model
+
+**[Open the browser playground ↗](https://fumitoshi0524.github.io/eiporion-minimind/)** · [Weights and tokenizer](demo/model/) · [Generation script](scripts/generate.py)
+
+A roughly 64M-parameter model with a **75.32 MiB** checkpoint. Click “加载模型” to download the weights and generate text on your own device using WebGPU. No login or API key is needed. A WebGPU-capable browser is required; the browser backend uses FP32 arithmetic while preserving INT8 projection-weight storage.
+
+The release is a **pretrained checkpoint**. Enter the beginning of a passage and explore its continuation; this checkpoint has not been instruction-tuned for chat.
+
+### An actual generation
+
+**Prompt:** 人工智能的发展
+
+**Continuation excerpt:**
+
+> 已经成为当今科技领域最重要的研究方向。随着人工智能技术的不断发展，人工智能已经成为当前科技领域最重要的研究方向之一。人工智能技术在医疗、金融、教育、交通等领域都得到了广泛应用，为人类生活带来极大的便利。
+
+Generated with the local PyTorch implementation; the [generation record](docs/generation-example.json) includes the full output and sampling settings. To generate locally after cloning the repository:
+
+```bash
+uv sync
+uv run python scripts/generate.py --model-dir demo/model \
+  --prompt "人工智能的发展" --max-new-tokens 96 --seed 42
+```
+
 ## Abstract
 
 Eiporion-MiniMind investigates whether the projection weights of a small decoder-only language model can remain in INT8 storage while being updated during pretraining. The implementation combines a MiniMind-derived transformer with Eiporion, a companion PyTorch library developed for quantized linear layers and discrete weight updates. Attention and feed-forward projections use INT8 weight buffers and per-row floating-point scales; the shared token embedding/output head and normalization weights remain floating point.
 
 **The focus is training-time weight storage: projection matrices are physically stored as INT8 throughout optimization, without separate FP16/FP32 master-weight copies. The reported implementation uses BF16 matrix multiplication and does not require native FP4/FP8 training instructions.**
 
-The eight-layer model has approximately 63.9 million dense-equivalent weights. Over two epochs and 39,696 microbatch iterations, training loss decreases from 8.0936 at the first logged step to 1.9683 at the final step. We evaluate the pretrained model locally on six English and Chinese zero-shot benchmarks. Its weights and scales occupy **75.30 MiB**, compared with **243.81 MiB for the equivalent FP32 representation**, a **3.24× storage reduction**. The results demonstrate a working training pipeline with compact persistent weights, while the near-chance downstream scores motivate further controlled evaluation of model quality.
+The eight-layer model has approximately 63.9 million dense-equivalent weights. Over two epochs and 39,696 microbatch iterations, training loss decreases from 8.0936 at the first logged step to 1.9683 at the final step. Its weights and scales occupy **75.30 MiB**, compared with **243.81 MiB for the equivalent FP32 representation**, a **3.24× storage reduction**. The experiment establishes a working direct quantized training pipeline. The released weights can be used locally or explored through an in-browser text-completion playground.
 
 ## 1. Research question and scope
 
@@ -26,7 +50,7 @@ The work comprises three connected pieces:
 
 - **Eiporion:** the author's [companion library](https://github.com/fumitoshi0524/eiporion) for INT8 linear layers, custom backward computation, and quantized optimizer state.
 - **Model integration:** replacing the seven projection matrices in each MiniMind-derived transformer block while retaining a floating-point embedding/output interface.
-- **Evaluation:** training dynamics, six zero-shot benchmarks, and whole-model weight-storage analysis.
+- **Runnable model:** training curves, whole-model storage analysis, public weights, and browser-local text generation.
 
 The quantized projection matrices are updated directly; embeddings, normalization, and intermediate computation use floating-point precision.
 
@@ -58,9 +82,9 @@ The model follows the decoder-only design used in [MiniMind](https://github.com/
 | Configured positional buffer | 32,768 positions |
 | Pretraining sequence length | 512 tokens |
 
-![Architecture of the MiniMind-derived model](img/Model_Structure.png)
+![Architecture of the MiniMind-derived model](img/model-and-update.svg)
 
-*Architecture overview. The storage and precision assignments are specified in the table and method below.*
+*Left: model structure. Right: the update loop for one quantized projection. Green denotes compact persistent state; gray denotes floating-point computation.*
 
 The 32,768-position configuration is not an evaluated context length. The code includes optional YaRN scaling, but `inference_rope_scaling` is disabled by default and no long-context evaluation is reported here.
 
@@ -199,22 +223,7 @@ Training loss falls rapidly during the early warmup phase and then decreases mor
 
 Loss values are measured on the logged training microbatches. The trajectory shows that the discrete projection updates support optimization of the next-token objective in this configuration.
 
-### 5.2 Zero-shot benchmark results
-
-After pretraining, the model was evaluated **locally** on six English and Chinese benchmarks using the [Language Model Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness). All evaluations use **zero-shot** prompting, without task-specific fine-tuning. We report accuracy and normalized accuracy where applicable.
-
-| Benchmark | Accuracy (%) | Normalized accuracy (%) |
-|---|---:|---:|
-| ARC-Easy | 28.45 | 28.32 |
-| HellaSwag | 27.32 | 28.58 |
-| PIQA | 52.23 | 50.82 |
-| WinoGrande | 52.64 | - |
-| C-Eval, 52 subjects | 23.25 | - |
-| CMMLU, 67 subjects | 25.30 | - |
-
-The scores indicate limited downstream capability: PIQA and WinoGrande remain close to the 50% binary-choice reference, while HellaSwag, C-Eval, and CMMLU are close to the 25% four-choice reference. The decrease in training loss therefore does not translate into strong performance on these tasks.
-
-### 5.3 Weight-storage accounting
+### 5.2 Weight-storage accounting
 
 Weight storage is calculated over the same unique model weights in each representation, using **MiB ($2^{20}$ bytes)** throughout. The INT8 representation includes its row scales and the floating-point embedding/output and normalization weights.
 
@@ -245,7 +254,7 @@ The experiment demonstrates a practical pipeline for training integer-stored tra
 
 Several questions remain open:
 
-- **Model quality:** a matched floating-point run is needed to isolate the effect of INT8 training. Near-chance multiple-choice scores provide limited resolution for that comparison.
+- **Model quality:** a matched floating-point run is needed to isolate the effect of INT8 training. The released checkpoint is pretrained only and is presented as text completion.
 - **Update design:** controlled comparisons of ordinary SR, momentum-biased SR, and deterministic rounding would clarify the role of the optimizer; per-row and per-tensor scales are another useful ablation.
 - **System efficiency and scale:** peak training memory, throughput, and repeated runs at larger model sizes would establish how the weight-storage savings translate into practical training benefits.
 
@@ -265,7 +274,7 @@ uv sync
 
 The reported experiment uses the environment in Section 4, including Eiporion 0.1.0. Package versions for a new run should be recorded alongside its training configuration.
 
-Obtain `pretrain_t2t_mini.jsonl` using the [MiniMind data instructions](https://github.com/jingyaogong/minimind), and place it in `dataset/`. Training data and model weights are stored separately from this code repository.
+Obtain `pretrain_t2t_mini.jsonl` using the [MiniMind data instructions](https://github.com/jingyaogong/minimind), and place it in `dataset/`. The released pretrained weights and tokenizer are in [`demo/model/`](demo/model/); training data must be obtained separately.
 
 ### Train
 
@@ -280,20 +289,17 @@ uv run python trainer/train_pretrain.py \
 
 The trainer writes `out/pretrain_768.pth` and resume checkpoints under `checkpoints/`. Use `--from_resume 1` to continue a saved run.
 
-### Export and evaluate
+### Export and generate
 
 ```bash
 uv run python scripts/export_hf.py \
   --weight pretrain --hidden-size 768 --num-hidden-layers 8 --save-dir out
 
-uv run lm_eval --model hf \
-  --model_args pretrained=./out,trust_remote_code=True,dtype=float32 \
-  --tasks arc_easy,hellaswag,piqa,winogrande,ceval-valid,cmmlu \
-  --num_fewshot 0 --batch_size 8 \
-  --output_path results/ --log_samples
+uv run python scripts/generate.py --model-dir out \
+  --prompt "人工智能的发展" --max-new-tokens 128
 ```
 
-Export includes the model implementation and tokenizer files required for local Hugging Face loading. The explicit floating-point dtype preserves the FP32 embedding/head representation, while projection buffers remain INT8. Evaluation outputs and per-example predictions are saved under `results/`.
+The export includes configuration, weights, and tokenizer files for local loading. The generation script preserves FP32 embedding/head weights and INT8 projection buffers. Completion is the default; `--mode chat` is reserved for a future instruction-tuned checkpoint.
 
 For an inspection of storage without loading the model or requiring a GPU:
 
@@ -317,7 +323,18 @@ The architecture and data pipeline build on [MiniMind](https://github.com/jingya
 
 ### Direct quantized updates
 
-- **Zhao et al., [Direct Quantized Training of Language Models with Stochastic Rounding](https://arxiv.org/abs/2412.04787), ACML 2025** ([code](https://github.com/KYuuto1006/DQT)). This is the closest methodological precedent: stochastic rounding enables updates without retaining a separate high-precision latent matrix. Its released [linear layer](https://github.com/KYuuto1006/DQT/blob/767a724ed3547b926f785a89613eda00bfa730b3/utils_quant.py) inherits `nn.Linear`; the [rounding code](https://github.com/KYuuto1006/DQT/blob/767a724ed3547b926f785a89613eda00bfa730b3/custom_optimizer.py) returns values in the input dtype. Eiporion's implementation explicitly stores projection matrices as INT8 buffers and combines their updates with blockwise quantized optimizer state.
+- **Zhao et al., [Direct Quantized Training of Language Models with Stochastic Rounding](https://arxiv.org/abs/2412.04787), ACML 2025** ([code](https://github.com/KYuuto1006/DQT)). DQT studies updates directly on a quantization grid, using stochastic rounding to preserve small updates. Eiporion shares this numerical background and implements an **integer-storage training path spanning weight representation, backward computation, and persistent optimizer state**.
+
+Four implementation choices work together:
+
+| Component | DQT public reference implementation | Eiporion implementation |
+|---|---|---|
+| Weight container | Floating-point `nn.Linear` parameters carry grid values; rounding returns the input dtype | Actual `torch.int8` buffers plus FP32 row scales; 58.98M projection weights occupy 56.25 MiB |
+| Gradient/update interface | Floating-point parameter gradients and optimizer interface | Custom backward caches effective-weight gradients; the optimizer updates integer buffers |
+| Sub-grid updates | Stochastic rounding of direct weight updates | Residual accumulation in integer coordinates, momentum-biased stochastic rounding, and carry-over of the remaining update |
+| Persistent optimizer state | The cited `MyAdamW` path initializes floating-point moments | First moments, second moments, and update residuals are persisted in blockwise 8-bit form |
+
+The distinction spans more than a rounding function: physical integer weights, residual updates, and quantized optimizer state are integrated into one training pipeline and a language model that can be trained, exported, and run interactively. BF16 GEMM performs the floating-point computation without requiring native FP4/FP8 training instructions. This comparison refers to the cited [DQT linear layer](https://github.com/KYuuto1006/DQT/blob/767a724ed3547b926f785a89613eda00bfa730b3/utils_quant.py) and [optimizer](https://github.com/KYuuto1006/DQT/blob/767a724ed3547b926f785a89613eda00bfa730b3/custom_optimizer.py); quantized optimizer-state storage is not the main question addressed by that paper.
 
 ### Latent weights and arithmetic precision
 
@@ -329,7 +346,6 @@ The architecture and data pipeline build on [MiniMind](https://github.com/jingya
 
 - Gupta et al., [*Deep Learning with Limited Numerical Precision*](https://proceedings.mlr.press/v37/gupta15.html), ICML 2015, studies stochastic rounding for low-precision training.
 - Dettmers et al., [*8-bit Optimizers via Block-wise Quantization*](https://arxiv.org/abs/2110.02861), ICLR 2022, develops low-precision optimizer statistics. Eiporion uses bitsandbytes for its floating-point parameters and its own state/update logic for INT8 buffers.
-- [EleutherAI's Language Model Evaluation Harness](https://github.com/EleutherAI/lm-evaluation-harness) provides the benchmark evaluation interface. Its [CLI documentation](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/docs/interface.md) describes result and sample logging.
 
 <details>
 <summary>Experiment records</summary>

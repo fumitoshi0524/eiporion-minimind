@@ -12,7 +12,7 @@ if(english){
   $('prompt').value='Artificial intelligence is';
   const prompts=['Artificial intelligence is','On a quiet evening,','Learning a new language'];
   document.querySelectorAll('[data-prompt]').forEach((b,i)=>{b.dataset.prompt=prompts[i];b.textContent=prompts[i];});
-  document.querySelector('.editor small').textContent='This 64M pretrained model has clear limitations. It can produce coherent passages, but also repetitive filler, loops, topic drift, and incorrect content. Output quality is inconsistent.';
+  document.querySelector('.editor small').textContent='This demonstration uses a pretrained language model with approximately 64M parameters. The model can generate locally coherent text, but generation quality varies across prompts and sampling runs. Outputs may exhibit repetition, topic drift, limited discourse coherence, and factual inaccuracies.';
   $('model-note-title').textContent='How to interpret these outputs';
   $('model-note-quality').textContent='Both coherent passages and repetition are real behaviors of this checkpoint. It has not been instruction-tuned for chat; even as a text-completion model, it does not reliably maintain logic, factual accuracy, or quality over longer passages. This demo exposes its current abilities and weaknesses.';
   $('model-note-summary').textContent='Why can it repeat or get stuck in a loop?';
